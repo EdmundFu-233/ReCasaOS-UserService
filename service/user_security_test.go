@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 -- constructs a legacy database fixture only.
 	"encoding/hex"
@@ -111,6 +112,17 @@ func TestLegacyMD5LoginCASMigratesToArgon2id(t *testing.T) {
 	}
 	if _, err := userService.AuthenticateUser("missing", []byte("wrong-password")); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("unknown login error=%v", err)
+	}
+}
+
+func TestAuthenticationRejectsOversizeInput(t *testing.T) {
+	db, seal := openSecurityTestDatabase(t)
+	userService := NewUserService(db, seal)
+	if _, err := userService.AuthenticateUser("missing", bytes.Repeat([]byte{'x'}, 1025)); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("oversize password error=%v", err)
+	}
+	if _, err := userService.AuthenticateUser(strings.Repeat("u", 257), []byte("password")); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("oversize username error=%v", err)
 	}
 }
 

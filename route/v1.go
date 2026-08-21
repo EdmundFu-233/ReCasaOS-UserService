@@ -26,7 +26,6 @@ func InitRouter() http.Handler {
 
 	e.POST("/v1/users/register", v1.PostUserRegister)
 	e.POST("/v1/users/login", v1.PostUserLogin)
-	e.GET("/v1/users/name", v1.GetUserAllUsername) // all/name
 	e.POST("/v1/users/refresh", v1.PostUserRefreshToken)
 	// No short-term modifications
 	e.GET("/v1/users/image", v1.GetUserImage)
@@ -54,6 +53,7 @@ func InitRouter() http.Handler {
 
 		v1UsersGroup.PUT("/avatar", v1.PutUserAvatar)
 		v1UsersGroup.GET("/avatar", v1.GetUserAvatar)
+		v1UsersGroup.GET("/name", v1.GetUserAllUsername)
 
 		v1UsersGroup.DELETE("/:id", v1.DeleteUser)
 		v1UsersGroup.GET("/:username", v1.GetUserInfoByUsername)

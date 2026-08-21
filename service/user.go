@@ -133,6 +133,10 @@ func (u *userService) UpdateUser(m model.UserDBModel) {
 }
 
 func (u *userService) AuthenticateUser(username string, plaintext []byte) (model.UserDBModel, error) {
+	if len(username) == 0 || len(username) > 256 || len(plaintext) == 0 || len(plaintext) > 1024 {
+		passwordutil.ConsumeUnknownUser([]byte("invalid-login-input"))
+		return model.UserDBModel{}, ErrInvalidCredentials
+	}
 	var user model.UserDBModel
 	if err := u.db.Where("username = ?", username).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -179,6 +183,9 @@ func (u *userService) AuthenticateUser(username string, plaintext []byte) (model
 func (u *userService) ChangeUserPassword(id string, oldPassword, newPassword []byte) error {
 	if err := ValidateNewPassword(newPassword); err != nil {
 		return err
+	}
+	if len(oldPassword) == 0 || len(oldPassword) > 1024 {
+		return ErrInvalidCredentials
 	}
 
 	var user model.UserDBModel

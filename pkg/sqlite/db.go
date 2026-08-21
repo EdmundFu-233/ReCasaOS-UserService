@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/IceWhaleTech/CasaOS-UserService/model"
@@ -95,6 +96,9 @@ func secureDirectory(path string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return errors.New("database directory must be a real directory, not a symlink")
 	}
+	if uid, ok := ownerUID(info); !ok || uid != uint32(os.Geteuid()) {
+		return errors.New("database directory has an unexpected owner")
+	}
 	if err := os.Chmod(path, 0o700); err != nil {
 		return fmt.Errorf("secure database directory: %w", err)
 	}
@@ -105,6 +109,9 @@ func secureDatabaseFile(path string) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("user database must be a regular file, not a symlink")
+		}
+		if uid, ok := ownerUID(info); !ok || uid != uint32(os.Geteuid()) {
+			return errors.New("user database has an unexpected owner")
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect user database: %w", err)
@@ -121,4 +128,12 @@ func secureDatabaseFile(path string) error {
 		return fmt.Errorf("secure user database bootstrap file: %w", err)
 	}
 	return nil
+}
+
+func ownerUID(info os.FileInfo) (uint32, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
 }

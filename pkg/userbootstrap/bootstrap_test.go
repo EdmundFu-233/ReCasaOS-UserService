@@ -15,6 +15,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const testArgon2Hash = "$argon2id$v=19$m=19456,t=1,p=1$JCQkJCQkJCQkJCQkJCQkJA$JCQkJCQkJCQkJCQkJCQkJA"
+
 func TestReconcileImportsLegacyUsersAndCreatesSeal(t *testing.T) {
 	db, _ := openTestDatabase(t)
 	seal := &memorySeal{}
@@ -29,6 +31,22 @@ func TestReconcileImportsLegacyUsersAndCreatesSeal(t *testing.T) {
 		t.Fatalf("legacy state=%+v seal=%q", state, seal.id)
 	}
 	assertDatabaseState(t, db, StatusInitialized, state.InstallationID)
+}
+
+func TestCreateAdminRejectsNonArgon2idVerifierBeforeWriting(t *testing.T) {
+	db, _ := openTestDatabase(t)
+	seal := &memorySeal{}
+	if _, err := CreateAdmin(context.Background(), db, seal, "admin", "plaintext-or-legacy-hash", nil); err == nil {
+		t.Fatal("CreateAdmin() accepted a non-Argon2id verifier")
+	}
+	assertUserCount(t, db, 0)
+	var stateCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM o_bootstrap_state`).Scan(&stateCount); err != nil {
+		t.Fatal(err)
+	}
+	if stateCount != 0 || seal.id != "" {
+		t.Fatalf("invalid verifier changed state: rows=%d seal=%q", stateCount, seal.id)
+	}
 }
 
 func TestReconcileFreshDatabaseIsPristineWithoutSeal(t *testing.T) {
@@ -46,7 +64,7 @@ func TestReconcileFreshDatabaseIsPristineWithoutSeal(t *testing.T) {
 func TestDatabaseOnlyRestoreWithExistingSealLocksRecovery(t *testing.T) {
 	firstDB, _ := openTestDatabase(t)
 	seal := &memorySeal{}
-	if _, err := CreateAdmin(context.Background(), firstDB, seal, "admin", "hash", nil); err != nil {
+	if _, err := CreateAdmin(context.Background(), firstDB, seal, "admin", testArgon2Hash, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -56,7 +74,7 @@ func TestDatabaseOnlyRestoreWithExistingSealLocksRecovery(t *testing.T) {
 		t.Fatalf("restored state=%+v err=%v", state, err)
 	}
 	assertDatabaseState(t, restoredEmptyDB, StatusRecovery, seal.id)
-	if _, err := CreateAdmin(context.Background(), restoredEmptyDB, seal, "attacker", "hash", nil); !errors.Is(err, ErrRecoveryRequired) {
+	if _, err := CreateAdmin(context.Background(), restoredEmptyDB, seal, "attacker", testArgon2Hash, nil); !errors.Is(err, ErrRecoveryRequired) {
 		t.Fatalf("bootstrap in recovery = %v", err)
 	}
 }
@@ -64,7 +82,7 @@ func TestDatabaseOnlyRestoreWithExistingSealLocksRecovery(t *testing.T) {
 func TestDeletingAllUsersPermanentlyLocksRecovery(t *testing.T) {
 	db, _ := openTestDatabase(t)
 	seal := &memorySeal{}
-	if _, err := CreateAdmin(context.Background(), db, seal, "admin", "hash", nil); err != nil {
+	if _, err := CreateAdmin(context.Background(), db, seal, "admin", testArgon2Hash, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`DELETE FROM o_users`); err != nil {
@@ -74,7 +92,7 @@ func TestDeletingAllUsersPermanentlyLocksRecovery(t *testing.T) {
 	if !errors.Is(err, ErrRecoveryRequired) || state.Status != StatusRecovery {
 		t.Fatalf("state after user deletion=%+v err=%v", state, err)
 	}
-	if _, err := CreateAdmin(context.Background(), db, seal, "replacement", "hash", nil); !errors.Is(err, ErrRecoveryRequired) {
+	if _, err := CreateAdmin(context.Background(), db, seal, "replacement", testArgon2Hash, nil); !errors.Is(err, ErrRecoveryRequired) {
 		t.Fatalf("replay after deletion = %v", err)
 	}
 }
@@ -93,7 +111,7 @@ func TestCreateAdminIsExactlyOnceUnderConcurrency(t *testing.T) {
 		go func() {
 			defer waitGroup.Done()
 			<-start
-			_, err := CreateAdmin(context.Background(), db, seal, fmt.Sprintf("admin-%d", index), "argon2id-hash", func(int64) error {
+			_, err := CreateAdmin(context.Background(), db, seal, fmt.Sprintf("admin-%d", index), testArgon2Hash, func(int64) error {
 				callbackCount.Add(1)
 				return nil
 			})
@@ -130,7 +148,7 @@ func TestCreateAdminRollsBackOnPreparationFailure(t *testing.T) {
 	db, _ := openTestDatabase(t)
 	seal := &memorySeal{}
 	wantErr := errors.New("filesystem unavailable")
-	if _, err := CreateAdmin(context.Background(), db, seal, "admin", "hash", func(int64) error { return wantErr }); !errors.Is(err, wantErr) {
+	if _, err := CreateAdmin(context.Background(), db, seal, "admin", testArgon2Hash, func(int64) error { return wantErr }); !errors.Is(err, wantErr) {
 		t.Fatalf("CreateAdmin() error = %v", err)
 	}
 	assertUserCount(t, db, 0)
@@ -138,7 +156,7 @@ func TestCreateAdminRollsBackOnPreparationFailure(t *testing.T) {
 	if seal.id != "" {
 		t.Fatalf("seal created after rollback: %q", seal.id)
 	}
-	if _, err := CreateAdmin(context.Background(), db, seal, "admin", "hash", nil); err != nil {
+	if _, err := CreateAdmin(context.Background(), db, seal, "admin", testArgon2Hash, nil); err != nil {
 		t.Fatalf("retry after rollback: %v", err)
 	}
 }
@@ -146,7 +164,7 @@ func TestCreateAdminRollsBackOnPreparationFailure(t *testing.T) {
 func TestMissingSealAfterCommitIsRepairedWithoutSecondUser(t *testing.T) {
 	db, _ := openTestDatabase(t)
 	seal := &memorySeal{failCreates: 1}
-	if _, err := CreateAdmin(context.Background(), db, seal, "admin", "hash", nil); err == nil {
+	if _, err := CreateAdmin(context.Background(), db, seal, "admin", testArgon2Hash, nil); err == nil {
 		t.Fatal("CreateAdmin() unexpectedly ignored seal write failure")
 	}
 	assertUserCount(t, db, 1)
@@ -154,7 +172,7 @@ func TestMissingSealAfterCommitIsRepairedWithoutSecondUser(t *testing.T) {
 	if seal.id != "" {
 		t.Fatalf("failed seal was persisted: %q", seal.id)
 	}
-	if _, err := CreateAdmin(context.Background(), db, seal, "second", "hash", nil); !errors.Is(err, ErrAlreadyInitialized) {
+	if _, err := CreateAdmin(context.Background(), db, seal, "second", testArgon2Hash, nil); !errors.Is(err, ErrAlreadyInitialized) {
 		t.Fatalf("retry error=%v, want ErrAlreadyInitialized", err)
 	}
 	assertUserCount(t, db, 1)
@@ -212,14 +230,14 @@ func TestBootstrapSubprocessHelper(t *testing.T) {
 	seal := NewFileSeal(os.Getenv("RECASAOS_BOOTSTRAP_SEAL"), uint32(os.Geteuid()))
 	switch mode {
 	case "crash":
-		_, _ = CreateAdmin(context.Background(), db, seal, "crash-admin", "hash", func(int64) error {
+		_, _ = CreateAdmin(context.Background(), db, seal, "crash-admin", testArgon2Hash, func(int64) error {
 			os.Exit(23)
 			return nil
 		})
 		os.Exit(72)
 	case "race":
 		username := os.Getenv("RECASAOS_BOOTSTRAP_USERNAME")
-		_, err := CreateAdmin(context.Background(), db, seal, username, "hash", nil)
+		_, err := CreateAdmin(context.Background(), db, seal, username, testArgon2Hash, nil)
 		if err == nil {
 			os.Exit(0)
 		}

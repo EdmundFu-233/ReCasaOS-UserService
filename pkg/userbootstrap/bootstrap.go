@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	passwordutil "github.com/IceWhaleTech/CasaOS-UserService/pkg/password"
 )
 
 const singletonID = 1
@@ -160,6 +162,9 @@ func ReconcileState(ctx context.Context, db *sql.DB, seal Seal) (State, error) {
 // beforeCommit may create required local resources; returning an error rolls
 // back every database change.
 func CreateAdmin(ctx context.Context, db *sql.DB, seal Seal, username, passwordHash string, beforeCommit func(userID int64) error) (int64, error) {
+	if !passwordutil.IsArgon2id(passwordHash) {
+		return 0, errors.New("bootstrap password must be an Argon2id verifier")
+	}
 	state, err := ReconcileState(ctx, db, seal)
 	if err != nil {
 		return 0, err

@@ -232,7 +232,7 @@ func PutUserInfo(ctx echo.Context) error {
 	}
 	if len(json.Username) > 0 {
 		u := service.MyService.User().GetUserInfoByUserName(json.Username)
-		if u.Id > 0 {
+		if u.Id > 0 && u.Id != user.Id {
 			return ctx.JSON(common_err.CLIENT_ERROR,
 				model.Result{Success: common_err.USER_EXIST, Message: common_err.GetMsg(common_err.USER_EXIST)})
 		}
@@ -253,6 +253,8 @@ func PutUserInfo(ctx echo.Context) error {
 	if len(json.Nickname) == 0 {
 		json.Nickname = user.Nickname
 	}
+	json.Id = user.Id
+	json.Role = user.Role
 	service.MyService.User().UpdateUser(json)
 	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: json})
 }
