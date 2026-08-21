@@ -6,6 +6,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 workflow_dir=${1:-"$repo_root/.github/workflows"}
 structure_checker="$script_dir/check-workflow-structure.rb"
+fixture_mode=${RECASAOS_WORKFLOW_POLICY_FIXTURE_MODE:-0}
 
 fail() {
   echo "workflow policy: $*" >&2
@@ -16,12 +17,41 @@ fail() {
 command -v ruby >/dev/null 2>&1 || fail "ruby is unavailable"
 [ -f "$structure_checker" ] && [ ! -L "$structure_checker" ] || fail "workflow structure checker is missing or symbolic"
 
+workflow_dir=$(cd "$workflow_dir" && pwd -P)
+default_workflow_dir=$(cd "$repo_root/.github/workflows" && pwd -P)
+case "$fixture_mode" in
+  0) ;;
+  1)
+    [ "$workflow_dir" != "$default_workflow_dir" ] ||
+      fail "fixture mode cannot disable the real repository workflow set"
+    ;;
+  *) fail "workflow fixture mode is malformed" ;;
+esac
+
+shopt -s nullglob dotglob
+workflow_files=("$workflow_dir"/*.yml "$workflow_dir"/*.yaml)
+if [ "$fixture_mode" = 0 ]; then
+  [ "${#workflow_files[@]}" -eq 2 ] || fail "workflow set must contain exactly ci.yml and codeql.yml"
+  found_ci=0
+  found_codeql=0
+  for workflow in "${workflow_files[@]}"; do
+    [ -f "$workflow" ] && [ ! -L "$workflow" ] || fail "workflow files must be regular and non-symbolic"
+    case "$(basename "$workflow")" in
+      ci.yml) found_ci=1 ;;
+      codeql.yml) found_codeql=1 ;;
+      *) fail "workflow set contains an unsupported filename" ;;
+    esac
+  done
+  [ "$found_ci" = 1 ] && [ "$found_codeql" = 1 ] ||
+    fail "workflow set must contain exactly ci.yml and codeql.yml"
+fi
+
 workflow_count=0
-for workflow in "$workflow_dir"/*.yml "$workflow_dir"/*.yaml; do
-	[ -f "$workflow" ] || continue
+for workflow in "${workflow_files[@]}"; do
+	[ -f "$workflow" ] && [ ! -L "$workflow" ] || fail "workflow files must be regular and non-symbolic"
 	workflow_count=$((workflow_count + 1))
 
-	ruby "$structure_checker" "$workflow" || fail "$workflow failed structured workflow validation"
+	ruby "$structure_checker" "$workflow" "$repo_root" || fail "$workflow failed structured workflow validation"
 
 	if grep -Eiq '\$\{\{[^}]*secrets([^[:alnum:]_]|$)' "$workflow"; then
     fail "$workflow references repository or environment secrets"

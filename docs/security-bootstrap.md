@@ -82,3 +82,41 @@ invalidating access and refresh tokens issued by the stopped process. The reset
 unit is not a network recovery API and is intentionally never enabled. Legacy
 non-administrator accounts remain locked until a separately reviewed
 administrator-driven reset flow exists; this command never promotes them.
+
+## Authentication compatibility hold
+
+The preferred request form is `Authorization: Bearer <access-token>`. The
+currently deployed CasaOS UI still sends a compact access JWT directly in the
+single `Authorization` header, so this fork temporarily accepts that exact raw
+header form as a migration compatibility exception. It does not inspect query
+parameters, cookies, form bodies, proxy headers, or loopback source addresses
+for authentication evidence. Duplicate, comma-joined, oversized, malformed,
+and refresh-token authorization headers fail closed.
+
+This exception must be removed after a ReCasaOS UI build that always sends the
+Bearer scheme is immutably pinned. Until then, the raw-header compatibility is
+an explicit release hold tracked by Issue #2, not a general token transport
+mechanism. Tokens must never be placed in URLs.
+
+## Debian 11 systemd qualification
+
+The required `Go 1.26.6` CI job also boots a checksum-pinned Debian 11 image
+under QEMU with systemd 247 as PID 1. It installs the exact checked-out,
+host-built static binary and the packaged units, then verifies:
+
+- systemd credential loading and source cleanup on success and failure;
+- exactly-once local bootstrap, replay rejection, and a usable administrator;
+- an upstream-shaped legacy database reset without unrelated schema drift;
+- daemon/reset lock exclusion and zero mutation on lock failure;
+- authenticated v1/v2 and refresh flows, with query/cookie/form tokens rejected;
+- password rotation followed by a new process and canonical public P-256 JWKS;
+- rejection of every access and refresh token issued by the stopped process;
+- exact Gateway/MessageBus registration through a body-free loopback stub; and
+- absence of passwords, verifiers, and all captured JWTs after daemon shutdown
+  and journal synchronization.
+
+This lane proves compatibility with the legacy systemd 247 target. The
+loopback dependency stub is not a full CasaOS stack, the host-built binary is
+not a final GoReleaser artifact, and Debian 11 is not declared the recommended
+new-deployment baseline. Full-stack UI, gateway, packaging, upgrade, and
+rollback qualification remain separate release gates.
