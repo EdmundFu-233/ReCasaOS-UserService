@@ -8,11 +8,11 @@ import (
 
 	codegen "github.com/IceWhaleTech/CasaOS-UserService/codegen/user_service"
 	v2 "github.com/IceWhaleTech/CasaOS-UserService/route/v2"
-	"github.com/deepmap/oapi-codegen/pkg/middleware"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/labstack/echo/v4"
 	echo_middleware "github.com/labstack/echo/v4/middleware"
+	echomiddleware "github.com/oapi-codegen/echo-middleware"
 )
 
 var (
@@ -61,9 +61,9 @@ func InitV2Router() http.Handler {
 
 	e.Use(userAccessTokenMiddleware())
 
-	e.Use(middleware.OapiRequestValidatorWithOptions(
+	e.Use(echomiddleware.OapiRequestValidatorWithOptions(
 		_swagger,
-		&middleware.Options{Options: openapi3filter.Options{
+		&echomiddleware.Options{Options: openapi3filter.Options{
 			AuthenticationFunc: v2OpenAPIAuthentication,
 		}},
 	))
@@ -89,7 +89,7 @@ func v2OpenAPIAuthentication(
 		return echo.ErrUnauthorized
 	}
 
-	echoContext := middleware.GetEchoContext(ctx)
+	echoContext := echomiddleware.GetEchoContext(ctx)
 	if echoContext == nil || echoContext.Request() == nil ||
 		echoContext.Request() != input.RequestValidationInput.Request {
 		return echo.ErrUnauthorized

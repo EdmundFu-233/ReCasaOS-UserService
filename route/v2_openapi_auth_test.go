@@ -7,10 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/deepmap/oapi-codegen/pkg/middleware"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/labstack/echo/v4"
+	echomiddleware "github.com/oapi-codegen/echo-middleware"
 )
 
 func TestV2OpenAPIAuthenticationBindsExactVerifiedRequest(t *testing.T) {
@@ -26,7 +26,7 @@ func TestV2OpenAPIAuthenticationBindsExactVerifiedRequest(t *testing.T) {
 	})
 	callbackContext := context.WithValue(
 		context.Background(),
-		middleware.EchoContextKey,
+		echomiddleware.EchoContextKey,
 		echoContext,
 	)
 	input := validV2AuthenticationInput(request)
@@ -49,7 +49,7 @@ func TestV2OpenAPIAuthenticationRejectsMalformedContracts(t *testing.T) {
 	echoContext := e.NewContext(request, httptest.NewRecorder())
 	callbackContext := context.WithValue(
 		context.Background(),
-		middleware.EchoContextKey,
+		echomiddleware.EchoContextKey,
 		echoContext,
 	)
 
