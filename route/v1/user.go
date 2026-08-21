@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/base64"
 	json2 "encoding/json"
+	"errors"
 	"image"
 	"image/png"
 	"io"
@@ -19,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/IceWhaleTech/CasaOS-Common/external"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/common_err"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
@@ -27,11 +27,10 @@ import (
 	"github.com/IceWhaleTech/CasaOS-UserService/model"
 	"github.com/IceWhaleTech/CasaOS-UserService/model/system_model"
 	"github.com/IceWhaleTech/CasaOS-UserService/pkg/config"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/encryption"
+	"github.com/IceWhaleTech/CasaOS-UserService/pkg/userbootstrap"
 	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/file"
 	model2 "github.com/IceWhaleTech/CasaOS-UserService/service/model"
 	"github.com/labstack/echo/v4"
-	uuid "github.com/satori/go.uuid"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
@@ -42,43 +41,12 @@ import (
 // @Summary register user
 // @Router /user/register/ [post]
 func PostUserRegister(ctx echo.Context) error {
-	json := make(map[string]string)
-	ctx.Bind(&json)
-
-	username := json["username"]
-	pwd := json["password"]
-	key := json["key"]
-	if _, ok := service.UserRegisterHash[key]; !ok {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.KEY_NOT_EXIST, Message: common_err.GetMsg(common_err.KEY_NOT_EXIST)})
-	}
-
-	if len(username) == 0 || len(pwd) == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
-	}
-	if len(pwd) < 6 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.PWD_IS_TOO_SIMPLE, Message: common_err.GetMsg(common_err.PWD_IS_TOO_SIMPLE)})
-	}
-	oldUser := service.MyService.User().GetUserInfoByUserName(username)
-	if oldUser.Id > 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.USER_EXIST, Message: common_err.GetMsg(common_err.USER_EXIST)})
-	}
-
-	user := model2.UserDBModel{}
-	user.Username = username
-	user.Password = encryption.GetMD5ByStr(pwd)
-	user.Role = "admin"
-
-	user = service.MyService.User().CreateUser(user)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
-	}
-	file.MkDir(config.AppInfo.UserDataPath + "/" + strconv.Itoa(user.Id))
-	delete(service.UserRegisterHash, key)
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS)})
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	return ctx.JSON(http.StatusGone, model.Result{
+		Success: http.StatusGone,
+		Message: "network registration is disabled; initialize the administrator locally",
+	})
 }
 
 var limiter = rate.NewLimiter(rate.Every(time.Minute), 5)
@@ -114,14 +82,15 @@ func PostUserLogin(ctx echo.Context) error {
 				Message: common_err.GetMsg(common_err.INVALID_PARAMS),
 			})
 	}
-	user := service.MyService.User().GetUserAllInfoByName(username)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	if user.Password != encryption.GetMD5ByStr(password) {
+	user, err := service.MyService.User().AuthenticateUser(username, []byte(password))
+	if errors.Is(err, service.ErrInvalidCredentials) {
 		return ctx.JSON(common_err.CLIENT_ERROR,
 			model.Result{Success: common_err.USER_NOT_EXIST_OR_PWD_INVALID, Message: common_err.GetMsg(common_err.USER_NOT_EXIST_OR_PWD_INVALID)})
+	}
+	if err != nil {
+		logger.Error("authenticate user", zap.Error(err))
+		return ctx.JSON(http.StatusInternalServerError,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
 
 	privateKey, _ := service.MyService.User().GetKeyPair()
@@ -304,16 +273,18 @@ func PutUserPassword(ctx echo.Context) error {
 	if len(oldPwd) == 0 || len(pwd) == 0 {
 		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
 	}
-	user := service.MyService.User().GetUserAllInfoById(id)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR,
-			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	if user.Password != encryption.GetMD5ByStr(oldPwd) {
+	err := service.MyService.User().ChangeUserPassword(id, []byte(oldPwd), []byte(pwd))
+	if errors.Is(err, service.ErrInvalidCredentials) {
 		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.PWD_INVALID_OLD, Message: common_err.GetMsg(common_err.PWD_INVALID_OLD)})
 	}
-	user.Password = encryption.GetMD5ByStr(pwd)
-	service.MyService.User().UpdateUserPassword(user)
+	if errors.Is(err, service.ErrWeakPassword) {
+		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.PWD_IS_TOO_SIMPLE, Message: common_err.GetMsg(common_err.PWD_IS_TOO_SIMPLE)})
+	}
+	if err != nil {
+		logger.Error("change user password", zap.Error(err))
+		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	}
+	user := service.MyService.User().GetUserInfoById(id)
 	user.Password = ""
 	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: user})
 }
@@ -542,7 +513,17 @@ func DeleteUserCustomConf(ctx echo.Context) error {
  */
 func DeleteUser(ctx echo.Context) error {
 	id := ctx.Param("id")
-	service.MyService.User().DeleteUserById(id)
+	err := service.MyService.User().DeleteUserById(id)
+	if errors.Is(err, service.ErrLastAdmin) {
+		return ctx.JSON(http.StatusConflict, model.Result{Success: http.StatusConflict, Message: "at least one administrator must remain"})
+	}
+	if errors.Is(err, service.ErrUserNotFound) {
+		return ctx.JSON(http.StatusNotFound, model.Result{Success: http.StatusNotFound, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
+	}
+	if err != nil {
+		logger.Error("delete user", zap.Error(err))
+		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	}
 	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: id})
 }
 
@@ -739,8 +720,8 @@ func PostUserRefreshToken(ctx echo.Context) error {
 }
 
 func DeleteUserAll(ctx echo.Context) error {
-	service.MyService.User().DeleteAllUser()
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS)})
+	_ = service.MyService.User().DeleteAllUser()
+	return ctx.JSON(http.StatusConflict, model.Result{Success: http.StatusConflict, Message: "bulk user deletion is disabled"})
 }
 
 // @Summary 检查是否进入引导状态
@@ -751,22 +732,24 @@ func DeleteUserAll(ctx echo.Context) error {
 // @Success 200 {string} string "ok"
 // @Router /sys/init/check [get]
 func GetUserStatus(ctx echo.Context) error {
-	data := make(map[string]interface{}, 2)
+	return getUserStatus(ctx, service.MyService.User())
+}
 
-	if service.MyService.User().GetUserCount() > 0 {
-		data["initialized"] = true
-		data["key"] = ""
-	} else {
-		key := uuid.NewV4().String()
-		service.UserRegisterHash[key] = key
-		data["key"] = key
-		data["initialized"] = false
-	}
-	gpus, err := external.NvidiaGPUInfoList()
+type initializationStateReader interface {
+	GetInitializationState(context.Context) (userbootstrap.State, error)
+}
+
+func getUserStatus(ctx echo.Context, reader initializationStateReader) error {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	state, err := reader.GetInitializationState(ctx.Request().Context())
 	if err != nil {
-		logger.Error("NvidiaGPUInfoList error", zap.Error(err))
+		return ctx.JSON(http.StatusServiceUnavailable,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
-	data["gpus"] = len(gpus)
+	data := map[string]bool{
+		"initialized": state.Initialized(),
+	}
 	return ctx.JSON(common_err.SUCCESS,
 		model.Result{
 			Success: common_err.SUCCESS,

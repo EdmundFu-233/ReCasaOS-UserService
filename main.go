@@ -2,15 +2,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/IceWhaleTech/CasaOS-Common/external"
@@ -21,16 +26,22 @@ import (
 	"github.com/IceWhaleTech/CasaOS-UserService/codegen/message_bus"
 	"github.com/IceWhaleTech/CasaOS-UserService/common"
 	"github.com/IceWhaleTech/CasaOS-UserService/pkg/config"
+	"github.com/IceWhaleTech/CasaOS-UserService/pkg/processlock"
 	"github.com/IceWhaleTech/CasaOS-UserService/pkg/sqlite"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/encryption"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/random"
+	"github.com/IceWhaleTech/CasaOS-UserService/pkg/userbootstrap"
 	"github.com/IceWhaleTech/CasaOS-UserService/route"
 	"github.com/IceWhaleTech/CasaOS-UserService/service"
 	"github.com/coreos/go-systemd/daemon"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 const localhost = "127.0.0.1"
+
+const (
+	defaultBootstrapSealPath = "/etc/casaos/recasaos-user-bootstrap.seal"
+	defaultProcessLockPath   = "/run/lock/recasaos-user-service.lock"
+)
 
 var (
 	commit = "private build"
@@ -46,57 +57,77 @@ var (
 	_confSample string
 )
 
-func init() {
-	configFlag := flag.String("c", "", "config address")
-	dbFlag := flag.String("db", "", "db path")
-	resetUserFlag := flag.Bool("ru", false, "reset user")
-	userFlag := flag.String("user", "", "user name")
-	versionFlag := flag.Bool("v", false, "version")
-
-	flag.Parse()
-
-	if *versionFlag {
-		fmt.Printf("v%s\n", common.Version)
-		os.Exit(0)
-	}
-
-	println("git commit:", commit)
-	println("build date:", date)
-
-	config.InitSetup(*configFlag, _confSample)
-
-	logger.LogInit(config.AppInfo.LogPath, config.AppInfo.LogSaveName, config.AppInfo.LogFileExt)
-
-	if len(*dbFlag) == 0 {
-		*dbFlag = config.AppInfo.DBPath
-	}
-
-	sqliteDB := sqlite.GetDb(*dbFlag)
-	service.MyService = service.NewService(sqliteDB, config.CommonInfo.RuntimePath)
-
-	if *resetUserFlag {
-		if userFlag == nil || len(*userFlag) == 0 {
-			fmt.Println("user is empty")
-			return
-		}
-
-		userData := service.MyService.User().GetUserAllInfoByName(*userFlag)
-
-		if userData.Id == 0 {
-			fmt.Println("user not exist")
-			return
-		}
-
-		password := random.RandomString(6, false)
-		userData.Password = encryption.GetMD5ByStr(password)
-		service.MyService.User().UpdateUserPassword(userData)
-		fmt.Println("User reset successful")
-		fmt.Println("UserName:" + userData.Username)
-		fmt.Println("Password:" + password)
+func main() {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr, os.Geteuid(), os.Getenv); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
-func main() {
+func run(args []string, stdout, stderr io.Writer, effectiveUID int, getenv func(string) string) error {
+	if len(args) > 0 && args[0] == "bootstrap-admin" {
+		return runBootstrapAdmin(args[1:], stdout, stderr, effectiveUID, getenv)
+	}
+	return runServer(args, stdout, stderr, effectiveUID)
+}
+
+func runServer(args []string, stdout, stderr io.Writer, effectiveUID int) error {
+	flags := flag.NewFlagSet("casaos-user-service", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFlag := flags.String("c", "", "config address")
+	dbFlag := flags.String("db", "", "database directory")
+	sealFlag := flags.String("bootstrap-seal", defaultBootstrapSealPath, "bootstrap seal outside the database directory")
+	lockFlag := flags.String("process-lock", defaultProcessLockPath, "daemon/bootstrap exclusion lock")
+	resetUserFlag := flags.Bool("ru", false, "disabled legacy password reset")
+	_ = flags.String("user", "", "disabled legacy reset username")
+	versionFlag := flags.Bool("v", false, "version")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *versionFlag {
+		fmt.Fprintf(stdout, "v%s\n", common.Version)
+		return nil
+	}
+	if *resetUserFlag {
+		return errors.New("-ru is disabled because it exposed plaintext passwords; use an authenticated local recovery workflow")
+	}
+	processLock, err := processlock.Acquire(*lockFlag, uint32(effectiveUID))
+	if err != nil {
+		return err
+	}
+	defer processLock.Close()
+
+	fmt.Fprintln(stdout, "git commit:", commit)
+	fmt.Fprintln(stdout, "build date:", date)
+	config.InitSetup(*configFlag, _confSample)
+	logger.LogInit(config.AppInfo.LogPath, config.AppInfo.LogSaveName, config.AppInfo.LogFileExt)
+	if *dbFlag == "" {
+		*dbFlag = config.AppInfo.DBPath
+	}
+
+	if err := requireSealOutsideDatabase(*dbFlag, *sealFlag); err != nil {
+		return err
+	}
+	sqliteDB, err := sqlite.GetDb(*dbFlag)
+	if err != nil {
+		return err
+	}
+	seal := userbootstrap.NewFileSeal(*sealFlag, uint32(effectiveUID))
+	sqlDB, err := sqliteDB.DB()
+	if err != nil {
+		return fmt.Errorf("access user database pool: %w", err)
+	}
+	if _, err := userbootstrap.ReconcileState(context.Background(), sqlDB, seal); err != nil {
+		return err
+	}
+	service.MyService = service.NewService(sqliteDB, config.CommonInfo.RuntimePath, seal)
+	if service.MyService == nil || service.MyService.User() == nil {
+		return errors.New("initialize user service")
+	}
+
 	v1Router := route.InitRouter()
 	v2Router := route.InitV2Router()
 	v2DocRouter := route.InitV2DocRouter(_docHTML, _docYAML)
@@ -105,7 +136,7 @@ func main() {
 
 	jswkJSON, err := jwt.GenerateJwksJSON(publicKey)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("generate JWKS document: %w", err)
 	}
 
 	mux := &util_http.HandlerMultiplexer{
@@ -119,8 +150,9 @@ func main() {
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(localhost, "0"))
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("listen for user service: %w", err)
 	}
+	defer listener.Close()
 
 	apiPaths := []string{
 		"/v1/users",
@@ -135,14 +167,14 @@ func main() {
 		})
 
 		if err != nil {
-			panic(err)
+			return fmt.Errorf("register gateway route %s: %w", v, err)
 		}
 	}
 
 	// write address file
 	addressFilePath, err := writeAddressFile(config.CommonInfo.RuntimePath, external.UserServiceAddressFilename, "http://"+listener.Addr().String())
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("write user service address: %w", err)
 	}
 
 	if supported, err := daemon.SdNotify(false, daemon.SdNotifyReady); err != nil {
@@ -166,7 +198,7 @@ func main() {
 		if response != nil && response.StatusCode() != http.StatusOK {
 			logger.Error("error when trying to register one or more event types - some event type will not be discoverable", zap.String("status", response.Status()), zap.String("body", string(response.Body)))
 		}
-		if response.StatusCode() == http.StatusOK {
+		if response != nil && response.StatusCode() == http.StatusOK {
 			break
 		}
 		time.Sleep(time.Second)
@@ -178,9 +210,205 @@ func main() {
 	}
 
 	err = s.Serve(listener) // not using http.serve() to fix G114: Use of net/http serve function that has no support for setting timeouts (see https://github.com/securego/gosec)
-	if err != nil {
-		panic(err)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve user service: %w", err)
 	}
+	return nil
+}
+
+const (
+	credentialsDirectoryEnvironment = "CREDENTIALS_DIRECTORY"
+	usernameCredentialName          = "recasaos.admin.username"
+	passwordCredentialName          = "recasaos.admin.password"
+	maximumCredentialBytes          = 1024
+)
+
+func runBootstrapAdmin(args []string, stdout, stderr io.Writer, effectiveUID int, getenv func(string) string) error {
+	flags := flag.NewFlagSet("bootstrap-admin", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFlag := flags.String("c", "", "config address")
+	dbFlag := flags.String("db", "", "database directory")
+	userDataFlag := flags.String("user-data", "", "user data directory")
+	sealFlag := flags.String("bootstrap-seal", defaultBootstrapSealPath, "bootstrap seal outside the database directory")
+	lockFlag := flags.String("process-lock", defaultProcessLockPath, "daemon/bootstrap exclusion lock")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("bootstrap-admin accepts no username or password arguments")
+	}
+	if effectiveUID != 0 {
+		return errors.New("bootstrap-admin requires effective uid 0")
+	}
+	processLock, err := processlock.Acquire(*lockFlag, uint32(effectiveUID))
+	if err != nil {
+		return err
+	}
+	defer processLock.Close()
+
+	credentialsDirectory := getenv(credentialsDirectoryEnvironment)
+	if credentialsDirectory == "" {
+		return fmt.Errorf("%s is not set; use systemd LoadCredential with %s and %s", credentialsDirectoryEnvironment, usernameCredentialName, passwordCredentialName)
+	}
+	usernameBytes, err := readCredential(credentialsDirectory, usernameCredentialName, uint32(effectiveUID))
+	if err != nil {
+		return err
+	}
+	defer erase(usernameBytes)
+	passwordBytes, err := readCredential(credentialsDirectory, passwordCredentialName, uint32(effectiveUID))
+	if err != nil {
+		return err
+	}
+	defer erase(passwordBytes)
+
+	if *dbFlag == "" || *userDataFlag == "" {
+		config.InitSetup(*configFlag, _confSample)
+		if *dbFlag == "" {
+			*dbFlag = config.AppInfo.DBPath
+		}
+		if *userDataFlag == "" {
+			*userDataFlag = config.AppInfo.UserDataPath
+		}
+	}
+	if err := requireSealOutsideDatabase(*dbFlag, *sealFlag); err != nil {
+		return err
+	}
+	db, err := sqlite.GetDb(*dbFlag)
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("access user database pool: %w", err)
+	}
+	defer sqlDB.Close()
+
+	seal := userbootstrap.NewFileSeal(*sealFlag, uint32(effectiveUID))
+	_, err = service.BootstrapAdmin(context.Background(), db, seal, string(usernameBytes), passwordBytes, func(userID int64) error {
+		return secureUserDataDirectory(filepath.Join(*userDataFlag, strconv.FormatInt(userID, 10)))
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "administrator bootstrap completed")
+	return nil
+}
+
+func readCredential(directory, name string, ownerUID uint32) ([]byte, error) {
+	if !filepath.IsAbs(directory) {
+		return nil, errors.New("credentials directory must be absolute")
+	}
+	directoryInfo, err := os.Lstat(directory)
+	if err != nil {
+		return nil, fmt.Errorf("inspect credentials directory: %w", err)
+	}
+	if directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
+		return nil, errors.New("credentials directory must be a real directory, not a symlink")
+	}
+	if directoryInfo.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("credentials directory must not be accessible by group or other users")
+	}
+	if uid, ok := ownerUIDFromFileInfo(directoryInfo); !ok || uid != ownerUID {
+		return nil, errors.New("credentials directory has an unexpected owner")
+	}
+
+	credentialPath := filepath.Join(directory, name)
+	beforeOpen, err := os.Lstat(credentialPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect credential %s: %w", name, err)
+	}
+	if beforeOpen.Mode()&os.ModeSymlink != 0 || !beforeOpen.Mode().IsRegular() {
+		return nil, fmt.Errorf("credential %s must be a regular file, not a symlink", name)
+	}
+	if beforeOpen.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("credential %s must not be accessible by group or other users", name)
+	}
+	if uid, ok := ownerUIDFromFileInfo(beforeOpen); !ok || uid != ownerUID {
+		return nil, fmt.Errorf("credential %s has an unexpected owner", name)
+	}
+
+	fd, err := unix.Open(credentialPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open credential %s: %w", name, err)
+	}
+	file := os.NewFile(uintptr(fd), credentialPath)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open credential %s", name)
+	}
+	defer file.Close()
+	afterOpen, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect open credential %s: %w", name, err)
+	}
+	if !os.SameFile(beforeOpen, afterOpen) || !afterOpen.Mode().IsRegular() {
+		return nil, fmt.Errorf("credential %s changed while opening", name)
+	}
+
+	contents, err := io.ReadAll(io.LimitReader(file, maximumCredentialBytes+3))
+	if err != nil {
+		return nil, fmt.Errorf("read credential %s: %w", name, err)
+	}
+	if len(contents) > maximumCredentialBytes+2 {
+		erase(contents)
+		return nil, fmt.Errorf("credential %s exceeds %d bytes", name, maximumCredentialBytes)
+	}
+	contents = bytes.TrimSuffix(contents, []byte("\n"))
+	contents = bytes.TrimSuffix(contents, []byte("\r"))
+	if len(contents) == 0 || len(contents) > maximumCredentialBytes || bytes.IndexByte(contents, 0) >= 0 || bytes.IndexAny(contents, "\r\n") >= 0 {
+		erase(contents)
+		return nil, fmt.Errorf("credential %s is empty or contains forbidden bytes", name)
+	}
+	return contents, nil
+}
+
+func secureUserDataDirectory(path string) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("administrator data path must be a real directory, not a symlink")
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect administrator data path: %w", err)
+	} else if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create administrator data path: %w", err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("secure administrator data path: %w", err)
+	}
+	return nil
+}
+
+func erase(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
+func ownerUIDFromFileInfo(info os.FileInfo) (uint32, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
+}
+
+func requireSealOutsideDatabase(databaseDirectory, sealPath string) error {
+	databaseAbsolute, err := filepath.Abs(databaseDirectory)
+	if err != nil {
+		return fmt.Errorf("resolve database directory: %w", err)
+	}
+	sealAbsolute, err := filepath.Abs(sealPath)
+	if err != nil {
+		return fmt.Errorf("resolve bootstrap seal: %w", err)
+	}
+	relative, err := filepath.Rel(databaseAbsolute, sealAbsolute)
+	if err != nil {
+		return fmt.Errorf("compare database and bootstrap seal paths: %w", err)
+	}
+	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))) {
+		return errors.New("bootstrap seal must be stored outside the database directory")
+	}
+	return nil
 }
 
 func writeAddressFile(runtimePath string, filename string, address string) (string, error) {
