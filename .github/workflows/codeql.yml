@@ -38,10 +38,13 @@ jobs:
         with:
           languages: go
       - name: Preflight selected Go tool package boundary
+        shell: bash
         run: bash scripts/check-go-dependency-boundary.sh --tools-only
       - name: Generate APIs
+        shell: bash
         run: go generate ./...
       - name: Build
+        shell: bash
         run: go build ./...
       - name: Analyze
         uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7

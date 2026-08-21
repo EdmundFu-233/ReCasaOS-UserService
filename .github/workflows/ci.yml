@@ -22,8 +22,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Test policy checker
+        shell: bash
         run: bash scripts/tests/check-workflow-policy_test.sh
       - name: Enforce repository workflow policy
+        shell: bash
         run: bash scripts/check-workflow-policy.sh
 
   go:
@@ -46,21 +48,28 @@ jobs:
           check-latest: false
           cache: false
       - name: Verify module graph
+        shell: bash
         run: go mod tidy -diff
       - name: Preflight selected Go tool package boundary
+        shell: bash
         run: bash scripts/check-go-dependency-boundary.sh --tools-only
       - name: Generate APIs and verify tracked outputs
+        shell: bash
         run: |
           go generate ./...
           git diff --exit-code -- codegen/
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: Enforce Linux test, release, and tool package boundaries
+        shell: bash
         run: bash scripts/check-go-dependency-boundary.sh --all
       - name: Enforce dependency license policy
+        shell: bash
         run: go tool go-licenses check --include_tests ./... tool
       - name: Race tests
+        shell: bash
         run: go test -race -count=1 ./...
       - name: Vet
+        shell: bash
         run: go vet ./...
       - name: Reachable vulnerability policy
         shell: bash
