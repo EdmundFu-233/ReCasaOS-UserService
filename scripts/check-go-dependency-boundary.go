@@ -19,15 +19,18 @@ import (
 )
 
 const (
-	forbiddenOpenPGPPackage = "golang.org/x/crypto/openpgp"
-	maximumGraphBytes       = 64 << 20
-	maximumSourceFileBytes  = 4 << 20
-	maximumSourceFiles      = 4096
+	forbiddenOpenPGPPackage       = "golang.org/x/crypto/openpgp"
+	forbiddenLegacyFilePackage    = "github.com/EdmundFu-233/ReCasaOS-UserService/pkg/utils/file"
+	forbiddenLegacyFileSourcePath = "pkg/utils/file"
+	maximumGraphBytes             = 64 << 20
+	maximumSourceFileBytes        = 4 << 20
+	maximumSourceFiles            = 4096
 )
 
-var forbiddenSourceImports = map[string]struct{}{
-	"crypto/md5":  {},
-	"crypto/sha1": {},
+var forbiddenSourceImports = map[string]string{
+	"crypto/md5":               "weak hash",
+	"crypto/sha1":              "weak hash",
+	forbiddenLegacyFilePackage: "removed unsafe path helper",
 }
 
 type packageRecord struct {
@@ -271,6 +274,14 @@ func inspectSourceImports(root string) (int, []string, error) {
 		if sourceInfo.Size() > maximumSourceFileBytes {
 			return fmt.Errorf("Go source file exceeds %d bytes: %s", maximumSourceFileBytes, path)
 		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relative = filepath.ToSlash(relative)
+		if relative == forbiddenLegacyFileSourcePath || strings.HasPrefix(relative, forbiddenLegacyFileSourcePath+"/") {
+			violations = append(violations, relative+": removed unsafe path helper package")
+		}
 		files++
 		if files > maximumSourceFiles {
 			return fmt.Errorf("source root exceeds %d Go files", maximumSourceFiles)
@@ -284,12 +295,8 @@ func inspectSourceImports(root string) (int, []string, error) {
 			if err != nil {
 				return fmt.Errorf("decode Go import in %s: %w", path, err)
 			}
-			if _, forbidden := forbiddenSourceImports[importPath]; forbidden {
-				relative, relErr := filepath.Rel(root, path)
-				if relErr != nil {
-					return relErr
-				}
-				violations = append(violations, filepath.ToSlash(relative)+": "+importPath)
+			if reason, forbidden := forbiddenSourceImports[importPath]; forbidden {
+				violations = append(violations, relative+": "+importPath+" ("+reason+")")
 			}
 		}
 		return nil
@@ -311,7 +318,7 @@ func enforceSourceImports(root string) {
 	}
 	if len(violations) != 0 {
 		for _, violation := range violations {
-			fmt.Fprintf(os.Stderr, "Go dependency boundary violation (source imports): forbidden weak hash import: %s\n", violation)
+			fmt.Fprintf(os.Stderr, "Go dependency boundary violation (source imports): forbidden source dependency: %s\n", violation)
 		}
 		os.Exit(1)
 	}
