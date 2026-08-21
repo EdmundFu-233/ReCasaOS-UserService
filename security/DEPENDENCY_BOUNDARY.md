@@ -19,6 +19,10 @@ packages such as `golang.org/x/crypto/argon2`. Invalid, empty, incomplete, or
 dependency-error graph records fail closed. Unit tests prove both the negative
 and allowed cases.
 
+A build-tag-independent repository source scan also rejects direct imports of
+the weak `crypto/md5` and `crypto/sha1` packages. Transitive standard-library
+protocol support does not satisfy this direct-import condition.
+
 The remaining module-only OpenPGP advisory context is tracked in
 [issue #1](https://github.com/EdmundFu-233/ReCasaOS-UserService/issues/1);
 it has not been dismissed.

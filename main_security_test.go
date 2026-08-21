@@ -117,6 +117,30 @@ func TestBootstrapCLIRejectsNonRootAndPasswordArgumentsWithoutDisclosure(t *test
 	}
 }
 
+func TestPasswordResetCLIRejectsNonRootAndPasswordArgumentsWithoutDisclosure(t *testing.T) {
+	secret := "never-print-this-reset-password"
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := run([]string{"reset-admin-password", "-password=" + secret}, stdout, stderr, 0, func(string) string {
+		t.Fatal("environment should not be read after argument parse failure")
+		return ""
+	})
+	if err == nil {
+		t.Fatal("reset-admin-password accepted a password argument")
+	}
+	if strings.Contains(err.Error()+stdout.String()+stderr.String(), secret) {
+		t.Fatal("reset argument error disclosed password value")
+	}
+
+	err = run([]string{"reset-admin-password"}, stdout, stderr, 1, func(string) string {
+		t.Fatal("non-root reset should fail before reading credentials")
+		return ""
+	})
+	if err == nil || !strings.Contains(err.Error(), "effective uid 0") {
+		t.Fatalf("non-root reset error = %v", err)
+	}
+}
+
 func TestLegacyResetIsDisabledWithoutPrintingCredentials(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
@@ -181,6 +205,31 @@ func TestSystemdBootstrapUnitIsOneShotAndConflictsWithDaemon(t *testing.T) {
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("bootstrap unit contains unsupported bare credential directive %q", forbidden)
+		}
+	}
+}
+
+func TestSystemdPasswordResetUnitIsLocalOneShot(t *testing.T) {
+	unit, err := os.ReadFile("build/sysroot/usr/lib/systemd/system/recasaos-user-password-reset.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(unit)
+	for _, required := range []string{
+		"Conflicts=casaos-user-service.service recasaos-user-bootstrap.service",
+		"Type=oneshot",
+		"LoadCredential=recasaos.admin.username:/run/recasaos-user-password-reset/username",
+		"LoadCredential=recasaos.admin.new-password:/run/recasaos-user-password-reset/new-password",
+		"ExecStart=/usr/bin/casaos-user-service reset-admin-password",
+		"ExecStopPost=-/usr/bin/rm -f -- /run/recasaos-user-password-reset/username /run/recasaos-user-password-reset/new-password",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("password reset unit is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"[Install]", "Environment=", "recasaos.admin.password:", "LoadCredential=recasaos.admin.new-password\n"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("password reset unit contains forbidden directive %q", forbidden)
 		}
 	}
 }

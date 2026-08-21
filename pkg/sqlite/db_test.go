@@ -36,6 +36,55 @@ func TestGetDbCreatesOwnerOnlyDatabaseAndSchema(t *testing.T) {
 	}
 }
 
+func TestGetExistingDbNeverCreatesMissingStorage(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "missing-user-data")
+	if _, err := GetExistingDb(directory); err == nil {
+		t.Fatal("GetExistingDb() created a missing database directory")
+	}
+	if _, err := os.Lstat(directory); !os.IsNotExist(err) {
+		t.Fatalf("missing database directory changed: %v", err)
+	}
+
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetExistingDb(directory); err == nil {
+		t.Fatal("GetExistingDb() created a missing database file")
+	}
+	if _, err := os.Lstat(filepath.Join(directory, databaseFilename)); !os.IsNotExist(err) {
+		t.Fatalf("missing database file changed: %v", err)
+	}
+}
+
+func TestGetExistingDbDoesNotMigrateAnEmptyExistingFile(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "existing-user-data")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(directory, databaseFilename)
+	if err := os.WriteFile(databasePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := GetExistingDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) != 0 {
+		t.Fatalf("existing empty database was modified to %d bytes", len(contents))
+	}
+}
+
 func TestGetDbRepairsExistingOverbroadModes(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "user-data")
 	if err := os.Mkdir(directory, 0o777); err != nil {

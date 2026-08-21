@@ -1,6 +1,6 @@
 [Unit]
 Description=ReCasaOS one-time local administrator bootstrap
-Conflicts=casaos-user-service.service
+Conflicts=casaos-user-service.service recasaos-user-password-reset.service
 Before=casaos-user-service.service
 
 [Service]

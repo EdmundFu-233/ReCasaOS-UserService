@@ -32,15 +32,26 @@ const databaseFilename = "user.db"
 // Initialization errors are returned to the caller instead of being logged and
 // ignored or panicking inside this package.
 func GetDb(dbPath string) (*gorm.DB, error) {
+	return openDb(dbPath, true, true)
+}
+
+// GetExistingDb opens an existing database without creating a directory or
+// database file. Local recovery commands use it so a mistyped path cannot
+// create a second empty user database.
+func GetExistingDb(dbPath string) (*gorm.DB, error) {
+	return openDb(dbPath, false, false)
+}
+
+func openDb(dbPath string, create, migrate bool) (*gorm.DB, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, errors.New("database directory is empty")
 	}
-	if err := secureDirectory(dbPath); err != nil {
+	if err := secureDirectory(dbPath, create); err != nil {
 		return nil, err
 	}
 
 	databasePath := filepath.Join(dbPath, databaseFilename)
-	if err := secureDatabaseFile(databasePath); err != nil {
+	if err := secureDatabaseFile(databasePath, create); err != nil {
 		return nil, err
 	}
 
@@ -48,6 +59,9 @@ func GetDb(dbPath string) (*gorm.DB, error) {
 	// gives concurrent BEGIN IMMEDIATE callers a bounded chance to serialize.
 	dsnURL := &url.URL{Scheme: "file", Path: databasePath}
 	query := dsnURL.Query()
+	if !create {
+		query.Add("mode", "rw")
+	}
 	query.Add("_pragma", "busy_timeout=5000")
 	query.Add("_pragma", "foreign_keys=1")
 	dsnURL.RawQuery = query.Encode()
@@ -70,8 +84,10 @@ func GetDb(dbPath string) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	if err := db.AutoMigrate(model2.UserDBModel{}, model2.BootstrapStateDBModel{}, model.EventModel{}); err != nil {
-		return closeOnError(fmt.Errorf("migrate user database: %w", err))
+	if migrate {
+		if err := db.AutoMigrate(model2.UserDBModel{}, model2.BootstrapStateDBModel{}, model.EventModel{}); err != nil {
+			return closeOnError(fmt.Errorf("migrate user database: %w", err))
+		}
 	}
 	if err := os.Chmod(databasePath, 0o600); err != nil {
 		return closeOnError(fmt.Errorf("secure user database: %w", err))
@@ -79,11 +95,14 @@ func GetDb(dbPath string) (*gorm.DB, error) {
 	return db, nil
 }
 
-func secureDirectory(path string) error {
+func secureDirectory(path string, create bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("inspect database directory: %w", err)
+		}
+		if !create {
+			return errors.New("user database directory does not exist")
 		}
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return fmt.Errorf("create database directory: %w", err)
@@ -105,7 +124,7 @@ func secureDirectory(path string) error {
 	return nil
 }
 
-func secureDatabaseFile(path string) error {
+func secureDatabaseFile(path string, create bool) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("user database must be a regular file, not a symlink")
@@ -113,13 +132,22 @@ func secureDatabaseFile(path string) error {
 		if uid, ok := ownerUID(info); !ok || uid != uint32(os.Geteuid()) {
 			return errors.New("user database has an unexpected owner")
 		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect user database: %w", err)
+	} else {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect user database: %w", err)
+		}
+		if !create {
+			return errors.New("user database file does not exist")
+		}
 	}
 
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
+	file, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
-		return fmt.Errorf("create user database: %w", err)
+		return fmt.Errorf("open user database bootstrap file: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close user database bootstrap file: %w", err)

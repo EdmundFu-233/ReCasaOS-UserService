@@ -36,6 +36,10 @@ if ! (cd "$repo_root" && env CGO_ENABLED=0 GOCACHE="$workspace/go-build-cache" G
 fi
 [ -x "$checker" ] || fail "structured dependency checker was not produced"
 
+if ! "$checker" -source-root "$repo_root" -source-only; then
+  fail "repository source import inspection failed"
+fi
+
 run_repository_graph() {
   local label=$1
   local goarch=$2

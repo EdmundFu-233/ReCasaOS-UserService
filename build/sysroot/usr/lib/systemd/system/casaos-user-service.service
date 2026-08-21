@@ -1,7 +1,7 @@
 [Unit]
 After=casaos-message-bus.service
 Description=CasaOS User Service
-Conflicts=recasaos-user-bootstrap.service
+Conflicts=recasaos-user-bootstrap.service recasaos-user-password-reset.service
 
 [Service]
 ExecStartPre=/usr/bin/casaos-user-service -v

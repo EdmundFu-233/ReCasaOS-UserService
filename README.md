@@ -18,7 +18,9 @@ provenance and the immutable fork baseline remain documented separately.
 Network registration is intentionally disabled. New installations must create
 their first administrator through the root-only systemd credential workflow in
 [docs/security-bootstrap.md](docs/security-bootstrap.md). The legacy `-ru`
-password-printing workflow is also disabled.
+password-printing workflow is also disabled. Existing administrators with a
+legacy weak verifier must use the documented root-only local password-reset
+oneshot; the network login path never evaluates that verifier.
 
 ## Security status
 
@@ -47,8 +49,9 @@ The generated APIs are tracked. The MessageBus input is a local vendored
 snapshot whose upstream commit and SHA-256 are checked before generation; the
 generator itself is version-pinned. See
 [api/message-bus/README.md](api/message-bus/README.md).
-The structured dependency boundary rejects selected OpenPGP packages while
-allowing reviewed packages such as `golang.org/x/crypto/argon2`; see
+The structured dependency boundary rejects selected OpenPGP packages and
+direct weak-hash imports while allowing reviewed packages such as
+`golang.org/x/crypto/argon2`; see
 [security/DEPENDENCY_BOUNDARY.md](security/DEPENDENCY_BOUNDARY.md).
 
 ## Release boundary

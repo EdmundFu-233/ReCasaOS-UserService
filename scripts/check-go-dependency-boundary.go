@@ -6,9 +6,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -16,7 +21,14 @@ import (
 const (
 	forbiddenOpenPGPPackage = "golang.org/x/crypto/openpgp"
 	maximumGraphBytes       = 64 << 20
+	maximumSourceFileBytes  = 4 << 20
+	maximumSourceFiles      = 4096
 )
+
+var forbiddenSourceImports = map[string]struct{}{
+	"crypto/md5":  {},
+	"crypto/sha1": {},
+}
 
 type packageRecord struct {
 	ImportPath string          `json:"ImportPath"`
@@ -219,9 +231,110 @@ func enforce(label string, payload []byte) {
 	fmt.Printf("Go dependency boundary check passed (%s): %d selected package records\n", label, count)
 }
 
+func inspectSourceImports(root string) (int, []string, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return 0, nil, fmt.Errorf("inspect source root: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return 0, nil, errors.New("source root must be a real directory, not a symlink")
+	}
+
+	files := 0
+	violations := make([]string, 0)
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != root && entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if filepath.Ext(entry.Name()) == ".go" {
+				return fmt.Errorf("Go source file is symbolic: %s", path)
+			}
+			return nil
+		}
+		if filepath.Ext(entry.Name()) != ".go" {
+			return nil
+		}
+		sourceInfo, infoErr := entry.Info()
+		if infoErr != nil {
+			return fmt.Errorf("inspect Go source file %s: %w", path, infoErr)
+		}
+		if !sourceInfo.Mode().IsRegular() {
+			return fmt.Errorf("Go source file is not regular: %s", path)
+		}
+		if sourceInfo.Size() > maximumSourceFileBytes {
+			return fmt.Errorf("Go source file exceeds %d bytes: %s", maximumSourceFileBytes, path)
+		}
+		files++
+		if files > maximumSourceFiles {
+			return fmt.Errorf("source root exceeds %d Go files", maximumSourceFiles)
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		if err != nil {
+			return fmt.Errorf("parse Go imports in %s: %w", path, err)
+		}
+		for _, imported := range parsed.Imports {
+			importPath, err := strconv.Unquote(imported.Path.Value)
+			if err != nil {
+				return fmt.Errorf("decode Go import in %s: %w", path, err)
+			}
+			if _, forbidden := forbiddenSourceImports[importPath]; forbidden {
+				relative, relErr := filepath.Rel(root, path)
+				if relErr != nil {
+					return relErr
+				}
+				violations = append(violations, filepath.ToSlash(relative)+": "+importPath)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return files, nil, err
+	}
+	if files == 0 {
+		return 0, nil, errors.New("source root contains no Go files")
+	}
+	sort.Strings(violations)
+	return files, violations, nil
+}
+
+func enforceSourceImports(root string) {
+	count, violations, err := inspectSourceImports(root)
+	if err != nil {
+		fail("source import policy: %v", err)
+	}
+	if len(violations) != 0 {
+		for _, violation := range violations {
+			fmt.Fprintf(os.Stderr, "Go dependency boundary violation (source imports): forbidden weak hash import: %s\n", violation)
+		}
+		os.Exit(1)
+	}
+	fmt.Printf("Go source import boundary check passed: %d Go files\n", count)
+}
+
 func main() {
 	label := flag.String("label", "unlabelled", "human-readable dependency graph label")
+	sourceRoot := flag.String("source-root", "", "repository source root to inspect")
+	sourceOnly := flag.Bool("source-only", false, "inspect source imports without reading a package graph")
 	flag.Parse()
+	if *sourceRoot != "" {
+		enforceSourceImports(*sourceRoot)
+	}
+	if *sourceOnly {
+		if *sourceRoot == "" {
+			fail("source-only mode requires -source-root")
+		}
+		if flag.NArg() != 0 {
+			fail("source-only mode accepts no package graph")
+		}
+		return
+	}
 	if flag.NArg() != 1 {
 		fail("usage: check-go-dependency-boundary [-label LABEL] PACKAGE_GRAPH_JSON")
 	}

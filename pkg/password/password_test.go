@@ -2,8 +2,6 @@ package password
 
 import (
 	"bytes"
-	"crypto/md5" // #nosec G501 -- constructs a legacy fixture only.
-	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -26,11 +24,10 @@ func TestArgon2idRoundTrip(t *testing.T) {
 	if !strings.HasPrefix(encoded, "$argon2id$v=19$m=19456,t=1,p=1$") {
 		t.Fatalf("unexpected PHC string: %q", encoded)
 	}
-	legacy, err := Verify(encoded, plaintext)
-	if err != nil || legacy {
-		t.Fatalf("Verify() = legacy %v, err %v", legacy, err)
+	if err := Verify(encoded, plaintext); err != nil {
+		t.Fatalf("Verify() error = %v", err)
 	}
-	if _, err := Verify(encoded, []byte("wrong password")); !errors.Is(err, ErrPassword) {
+	if err := Verify(encoded, []byte("wrong password")); !errors.Is(err, ErrPassword) {
 		t.Fatalf("wrong password error = %v", err)
 	}
 	if !NeedsRehash(encoded) {
@@ -56,23 +53,67 @@ func TestHashUsesIndependentSalts(t *testing.T) {
 	}
 }
 
-func TestLegacyMD5VerificationIsMigrationOnly(t *testing.T) {
-	plaintext := []byte("legacy-password")
-	digest := md5.Sum(plaintext) // #nosec G401 -- legacy fixture.
-	encoded := hex.EncodeToString(digest[:])
+func TestLegacyWeakVerifierIsRejected(t *testing.T) {
+	// Known legacy digest for "legacy-password". The test intentionally uses a
+	// fixed vector so no weak hash implementation is linked into the service.
+	const legacyVerifier = "12121b2b7fdedd5ec5777926650d7119"
+	if err := Verify(legacyVerifier, []byte("legacy-password")); !errors.Is(err, ErrInvalidHash) {
+		t.Fatalf("Verify() error = %v; want strict rejection", err)
+	}
+	if !NeedsRehash(legacyVerifier) || IsArgon2id(legacyVerifier) {
+		t.Fatal("legacy verifier was mistaken for Argon2id")
+	}
+}
 
-	legacy, err := Verify(encoded, plaintext)
-	if err != nil || !legacy {
-		t.Fatalf("Verify() = legacy %v, err %v", legacy, err)
+func TestEveryRejectedCredentialPathPerformsExactlyOneKDF(t *testing.T) {
+	valid, err := hashWithReader(
+		[]byte("correct horse battery staple"),
+		fastTestParameters,
+		bytes.NewReader(bytes.Repeat([]byte{0x35}, MinSaltLength)),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := Verify(encoded, []byte("wrong")); !errors.Is(err, ErrPassword) {
-		t.Fatalf("wrong legacy password error = %v", err)
+
+	tests := []struct {
+		name string
+		run  func(deriveKeyFunction) error
+	}{
+		{
+			name: "malformed stored verifier",
+			run: func(derive deriveKeyFunction) error {
+				return verifyWithDeriver("12121b2b7fdedd5ec5777926650d7119", []byte("candidate"), derive)
+			},
+		},
+		{
+			name: "wrong Argon2id password",
+			run: func(derive deriveKeyFunction) error {
+				return verifyWithDeriver(valid, []byte("wrong"), derive)
+			},
+		},
+		{
+			name: "missing user",
+			run: func(derive deriveKeyFunction) error {
+				consumeUnknownUserWithDeriver([]byte("candidate"), derive)
+				return ErrPassword
+			},
+		},
 	}
-	if _, err := Verify(strings.ToUpper(encoded), plaintext); !errors.Is(err, ErrInvalidHash) {
-		t.Fatalf("uppercase legacy hash should be rejected, got %v", err)
-	}
-	if !NeedsRehash(encoded) || IsArgon2id(encoded) {
-		t.Fatal("legacy hash was mistaken for Argon2id")
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			derive := func(_ []byte, _ []byte, _ Parameters, keyLength int) []byte {
+				calls++
+				return make([]byte, keyLength)
+			}
+			if err := test.run(derive); err == nil {
+				t.Fatal("rejected credential path unexpectedly succeeded")
+			}
+			if calls != 1 {
+				t.Fatalf("KDF calls = %d, want 1", calls)
+			}
+		})
 	}
 }
 
@@ -101,7 +142,7 @@ func TestPHCParserRejectsUnboundedAndNonCanonicalInputs(t *testing.T) {
 		strings.Replace(valid, "JCQkJCQkJCQkJCQkJCQkJA", "JCQkJCQkJCQkJCQkJCQkJA=", 1),
 	}
 	for _, encoded := range tests {
-		if _, err := Verify(encoded, []byte("irrelevant")); !errors.Is(err, ErrInvalidHash) {
+		if err := Verify(encoded, []byte("irrelevant")); !errors.Is(err, ErrInvalidHash) {
 			t.Errorf("Verify(%q) error = %v, want ErrInvalidHash", encoded, err)
 		}
 	}

@@ -38,10 +38,11 @@ Do not use the network registration endpoint as a recovery fallback.
 The database marker is paired with
 `/etc/casaos/recasaos-user-bootstrap.seal`. The seal is deliberately outside
 the database directory. Never include it in a database-only restore and never
-delete it to retry setup. A missing or mismatched database/seal pair, or an
-initialized database with no users, enters fail-closed `recovery` state. It
-cannot create another administrator through the bootstrap command; investigate
-and restore a consistent backup instead.
+delete it to retry setup. A mismatched database/seal pair, or an initialized
+database with no users, enters fail-closed `recovery` state. A valid initialized
+marker with no seal may republish only the same installation ID; this narrowly
+recovers the deliberate database-commit-before-seal crash window and never
+creates another administrator.
 
 On success the command prints only:
 
@@ -50,3 +51,34 @@ administrator bootstrap completed
 ```
 
 It never prints the username or password.
+
+## Existing installations with legacy password verifiers
+
+ReCasaOS never evaluates legacy weak password hashes during login. Before
+promoting this fork on an existing installation, use the disabled
+`recasaos-user-password-reset.service` to replace the selected existing
+administrator's verifier with Argon2id.
+
+Create root-owned mode `0600` sources at
+`/run/recasaos-user-password-reset/username` and
+`/run/recasaos-user-password-reset/new-password` under that root-owned mode
+`0700` directory. They are loaded as `recasaos.admin.username` and
+`recasaos.admin.new-password`. Then use
+the same explicit stop → start/wait/verify oneshot → verify source deletion →
+start daemon lifecycle described above. The reset command:
+
+- requires effective UID 0 and the same daemon-exclusion process lock;
+- refuses to create a missing database or database directory;
+- imports an unmodified legacy database only when it already has users and has
+  neither a bootstrap-state row nor an external seal;
+- otherwise requires an initialized database and either its matching external
+  seal or the narrowly repairable missing-seal crash state described above;
+- requires the selected existing account to have the `admin` role;
+- never evaluates or logs the old verifier; and
+- replaces only that administrator's password in one immediate transaction.
+
+Restarting the daemon after the reset generates a new in-memory signing key,
+invalidating access and refresh tokens issued by the stopped process. The reset
+unit is not a network recovery API and is intentionally never enabled. Legacy
+non-administrator accounts remain locked until a separately reviewed
+administrator-driven reset flow exists; this command never promotes them.

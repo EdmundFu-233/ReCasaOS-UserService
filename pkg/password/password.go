@@ -1,14 +1,13 @@
 // Package password implements the password formats accepted by the user service.
-// New passwords are always encoded as bounded Argon2id PHC strings. The legacy
-// unsalted MD5 format is accepted only so a successful login can migrate it.
+// New passwords are always encoded as bounded Argon2id PHC strings. Legacy
+// weak password hashes are never evaluated; administrators must replace them
+// through the root-only local password-reset workflow.
 package password
 
 import (
-	"crypto/md5" // #nosec G501 -- legacy verification only; never used for new password storage.
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -67,6 +66,8 @@ type parsedHash struct {
 	digest     []byte
 }
 
+type deriveKeyFunction func(plaintext, salt []byte, parameters Parameters, keyLength int) []byte
+
 func Hash(plaintext []byte) (string, error) {
 	return hashWithReader(plaintext, defaultParameters, rand.Reader)
 }
@@ -93,38 +94,32 @@ func hashWithReader(plaintext []byte, parameters Parameters, random io.Reader) (
 	), nil
 }
 
-// Verify accepts bounded Argon2id PHC strings and the exact legacy lowercase
-// MD5 representation. A true legacy result means callers must migrate with a
-// compare-and-swap update before treating the migration as complete.
-func Verify(encoded string, plaintext []byte) (legacy bool, err error) {
-	if isLegacyMD5(encoded) {
-		sum := md5.Sum(plaintext) // #nosec G401 -- compatibility check followed by an Argon2id migration.
-		expected := make([]byte, md5.Size)
-		if _, decodeErr := hex.Decode(expected, []byte(encoded)); decodeErr != nil {
-			return false, ErrInvalidHash
-		}
-		if subtle.ConstantTimeCompare(sum[:], expected) != 1 {
-			return true, ErrPassword
-		}
-		return true, nil
-	}
+// Verify accepts only bounded Argon2id PHC strings.
+func Verify(encoded string, plaintext []byte) error {
+	return verifyWithDeriver(encoded, plaintext, deriveKey)
+}
 
+func verifyWithDeriver(encoded string, plaintext []byte, derive deriveKeyFunction) error {
 	parsed, err := parse(encoded)
 	if err != nil {
-		return false, err
+		_ = derive(plaintext, []byte("ReCasaOS-dummy-v1"), defaultParameters, defaultParameters.KeyLength)
+		return err
 	}
-	digest := deriveKey(plaintext, parsed.salt, parsed.parameters, len(parsed.digest))
+	digest := derive(plaintext, parsed.salt, parsed.parameters, len(parsed.digest))
 	if subtle.ConstantTimeCompare(digest, parsed.digest) != 1 {
-		return false, ErrPassword
+		return ErrPassword
 	}
-	return false, nil
+	return nil
 }
 
 // ConsumeUnknownUser performs the same bounded Argon2id work as a normal
 // login, reducing the username-existence timing signal. The result is ignored.
 func ConsumeUnknownUser(plaintext []byte) {
-	parameters := defaultParameters
-	_ = deriveKey(plaintext, []byte("ReCasaOS-dummy-v1"), parameters, parameters.KeyLength)
+	consumeUnknownUserWithDeriver(plaintext, deriveKey)
+}
+
+func consumeUnknownUserWithDeriver(plaintext []byte, derive deriveKeyFunction) {
+	_ = derive(plaintext, []byte("ReCasaOS-dummy-v1"), defaultParameters, defaultParameters.KeyLength)
 }
 
 func deriveKey(plaintext, salt []byte, parameters Parameters, keyLength int) []byte {
@@ -208,16 +203,4 @@ func validateParameters(parameters Parameters) error {
 		return ErrInvalidHash
 	}
 	return nil
-}
-
-func isLegacyMD5(encoded string) bool {
-	if len(encoded) != md5.Size*2 {
-		return false
-	}
-	for _, character := range encoded {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
 }

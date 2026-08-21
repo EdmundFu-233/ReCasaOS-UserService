@@ -19,6 +19,7 @@ import (
 	"mime/multipart"
 	"os"
 	"regexp"
+	"strings"
 
 	passwordutil "github.com/EdmundFu-233/ReCasaOS-UserService/pkg/password"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
@@ -33,8 +34,10 @@ var (
 	ErrInvalidCredentials = errors.New("invalid username or password")
 	ErrPasswordChanged    = errors.New("password changed concurrently")
 	ErrLastAdmin          = errors.New("refuse to delete the last administrator")
+	ErrNotAdministrator   = errors.New("user is not an administrator")
 	ErrUserNotFound       = errors.New("user not found")
 	ErrInvalidUsername    = errors.New("username must be 1-64 characters and contain only letters, numbers, dot, underscore, or hyphen")
+	ErrInvalidResetTarget = errors.New("administrator username credential is invalid")
 	ErrWeakPassword       = errors.New("password must be between 12 and 1024 bytes")
 )
 
@@ -146,14 +149,14 @@ func (u *userService) AuthenticateUser(username string, plaintext []byte) (model
 		return model.UserDBModel{}, fmt.Errorf("load user for authentication: %w", err)
 	}
 
-	legacy, err := passwordutil.Verify(user.Password, plaintext)
+	err := passwordutil.Verify(user.Password, plaintext)
 	if err != nil {
 		if errors.Is(err, passwordutil.ErrPassword) || errors.Is(err, passwordutil.ErrInvalidHash) {
 			return model.UserDBModel{}, ErrInvalidCredentials
 		}
 		return model.UserDBModel{}, fmt.Errorf("verify password: %w", err)
 	}
-	if legacy || passwordutil.NeedsRehash(user.Password) {
+	if passwordutil.NeedsRehash(user.Password) {
 		newHash, err := passwordutil.Hash(plaintext)
 		if err != nil {
 			return model.UserDBModel{}, fmt.Errorf("upgrade password hash: %w", err)
@@ -169,7 +172,7 @@ func (u *userService) AuthenticateUser(username string, plaintext []byte) (model
 			if err := u.db.Where("id = ?", user.Id).First(&current).Error; err != nil {
 				return model.UserDBModel{}, ErrInvalidCredentials
 			}
-			if _, err := passwordutil.Verify(current.Password, plaintext); err != nil {
+			if err := passwordutil.Verify(current.Password, plaintext); err != nil {
 				return model.UserDBModel{}, ErrInvalidCredentials
 			}
 			user = current
@@ -195,7 +198,7 @@ func (u *userService) ChangeUserPassword(id string, oldPassword, newPassword []b
 		}
 		return fmt.Errorf("load user for password change: %w", err)
 	}
-	if _, err := passwordutil.Verify(user.Password, oldPassword); err != nil {
+	if err := passwordutil.Verify(user.Password, oldPassword); err != nil {
 		return ErrInvalidCredentials
 	}
 	newHash, err := passwordutil.Hash(newPassword)
@@ -288,6 +291,177 @@ func BootstrapAdmin(ctx context.Context, db *gorm.DB, seal userbootstrap.Seal, u
 		return 0, fmt.Errorf("access user database pool: %w", err)
 	}
 	return userbootstrap.CreateAdmin(ctx, sqlDB, seal, username, hash, beforeCommit)
+}
+
+// ResetAdminPassword replaces an existing administrator's verifier while the
+// daemon is stopped. It requires a matching initialized database/seal pair and
+// never evaluates the legacy verifier being replaced.
+func ResetAdminPassword(ctx context.Context, db *gorm.DB, seal userbootstrap.Seal, username string, plaintext []byte) (err error) {
+	if !validResetUsername(username) {
+		return ErrInvalidResetTarget
+	}
+	if err := ValidateNewPassword(plaintext); err != nil {
+		return err
+	}
+	newHash, err := passwordutil.Hash(plaintext)
+	if err != nil {
+		return fmt.Errorf("hash replacement administrator password: %w", err)
+	}
+	if seal == nil {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("access user database pool: %w", err)
+	}
+	sealID, sealExists, err := seal.Load()
+	if err != nil {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	hasStateTable, err := bootstrapStateTableExists(ctx, sqlDB)
+	if err != nil {
+		return err
+	}
+	if _, _, err := loadUniqueAdministrator(ctx, sqlDB, username); err != nil {
+		return err
+	}
+	if !hasStateTable {
+		if sealExists {
+			return userbootstrap.ErrRecoveryRequired
+		}
+		if err := db.AutoMigrate(&model.BootstrapStateDBModel{}); err != nil {
+			return fmt.Errorf("create bootstrap state for legacy administrator reset: %w", err)
+		}
+	}
+	var existingID string
+	var existingStatus userbootstrap.Status
+	markerErr := sqlDB.QueryRowContext(ctx,
+		`SELECT installation_id, status FROM o_bootstrap_state WHERE id = 1`,
+	).Scan(&existingID, &existingStatus)
+	switch {
+	case errors.Is(markerErr, sql.ErrNoRows):
+		if sealExists {
+			return userbootstrap.ErrRecoveryRequired
+		}
+	case markerErr != nil:
+		return fmt.Errorf("inspect administrator reset state: %w", markerErr)
+	case existingStatus != userbootstrap.StatusInitialized:
+		return userbootstrap.ErrRecoveryRequired
+	case sealExists && existingID != sealID:
+		return userbootstrap.ErrRecoveryRequired
+	}
+
+	state, err := userbootstrap.ReconcileState(ctx, sqlDB, seal)
+	if err != nil {
+		return err
+	}
+	if state.Status != userbootstrap.StatusInitialized {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	sealID, sealExists, err = seal.Load()
+	if err != nil || !sealExists || sealID != state.InstallationID {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire administrator reset connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin administrator reset transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
+	var databaseID string
+	var status userbootstrap.Status
+	if err := conn.QueryRowContext(ctx,
+		`SELECT installation_id, status FROM o_bootstrap_state WHERE id = 1`,
+	).Scan(&databaseID, &status); err != nil || databaseID != state.InstallationID || status != userbootstrap.StatusInitialized {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	userID, oldHash, err := loadUniqueAdministrator(ctx, conn, username)
+	if err != nil {
+		return err
+	}
+	result, err := conn.ExecContext(ctx,
+		`UPDATE o_users SET password = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND username = ? AND role = 'admin' AND password = ?`,
+		newHash, userID, username, oldHash,
+	)
+	if err != nil {
+		return fmt.Errorf("store replacement administrator password: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read administrator reset result: %w", err)
+	}
+	if rows != 1 {
+		return ErrPasswordChanged
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit administrator reset: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func bootstrapStateTableExists(ctx context.Context, db *sql.DB) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'o_bootstrap_state'`,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect bootstrap state schema: %w", err)
+	}
+	if count != 0 && count != 1 {
+		return false, userbootstrap.ErrRecoveryRequired
+	}
+	return count == 1, nil
+}
+
+type rowQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadUniqueAdministrator(ctx context.Context, db rowQueryer, username string) (int64, string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, role, password FROM o_users WHERE username = ? LIMIT 2`, username)
+	if err != nil {
+		return 0, "", fmt.Errorf("inspect local reset target: %w", err)
+	}
+	defer rows.Close()
+	count := 0
+	var userID int64
+	role, oldHash := "", ""
+	for rows.Next() {
+		count++
+		if err := rows.Scan(&userID, &role, &oldHash); err != nil {
+			return 0, "", fmt.Errorf("read local reset target: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", fmt.Errorf("read local reset target: %w", err)
+	}
+	if count == 0 {
+		return 0, "", ErrUserNotFound
+	}
+	if count != 1 {
+		return 0, "", ErrInvalidResetTarget
+	}
+	if role != "admin" {
+		return 0, "", ErrNotAdministrator
+	}
+	return userID, oldHash, nil
+}
+
+func validResetUsername(username string) bool {
+	if len(username) == 0 || len(username) > 256 {
+		return false
+	}
+	return !strings.ContainsAny(username, "\x00\r\n")
 }
 
 func ValidateNewPassword(plaintext []byte) error {
