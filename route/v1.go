@@ -1,13 +1,9 @@
 package route
 
 import (
-	"crypto/ecdsa"
 	"net/http"
-	"strconv"
 
-	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	v1 "github.com/IceWhaleTech/CasaOS-UserService/route/v1"
-	"github.com/IceWhaleTech/CasaOS-UserService/service"
 	"github.com/labstack/echo/v4"
 	echo_middleware "github.com/labstack/echo/v4/middleware"
 )
@@ -26,7 +22,7 @@ func InitRouter() http.Handler {
 
 	e.Use(echo_middleware.Gzip())
 
-	e.Use(echo_middleware.Logger())
+	e.Use(safeRequestLogger())
 
 	e.POST("/v1/users/register", v1.PostUserRegister)
 	e.POST("/v1/users/login", v1.PostUserLogin)
@@ -40,34 +36,7 @@ func InitRouter() http.Handler {
 	v1Group := e.Group("/v1")
 
 	v1UsersGroup := v1Group.Group("/users")
-	v1UsersGroup.Use(echo_middleware.JWTWithConfig(echo_middleware.JWTConfig{
-		Skipper: func(c echo.Context) bool {
-			return c.RealIP() == "::1" || c.RealIP() == "127.0.0.1"
-		},
-		ParseTokenFunc: func(token string, c echo.Context) (interface{}, error) {
-			valid, claims, err := jwt.Validate(
-				token,
-				func() (*ecdsa.PublicKey, error) {
-					_, publicKey := service.MyService.User().GetKeyPair()
-					return publicKey, nil
-				})
-			if err != nil || !valid {
-				return nil, echo.ErrUnauthorized
-			}
-
-			c.Request().Header.Set("user_id", strconv.Itoa(claims.ID))
-
-			return claims, nil
-		},
-		TokenLookupFuncs: []echo_middleware.ValuesExtractor{
-			func(c echo.Context) ([]string, error) {
-				if len(c.Request().Header.Get(echo.HeaderAuthorization)) > 0 {
-					return []string{c.Request().Header.Get(echo.HeaderAuthorization)}, nil
-				}
-				return []string{c.QueryParam("token")}, nil
-			},
-		},
-	}))
+	v1UsersGroup.Use(userAccessTokenMiddleware())
 	{
 		v1UsersGroup.Use()
 		v1UsersGroup.GET("/current", v1.GetUserInfo)
