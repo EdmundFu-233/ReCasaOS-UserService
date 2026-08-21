@@ -1,0 +1,7 @@
+# No reachable vulnerability exceptions are currently allowed.
+#
+# Module-only findings are not treated as fixed by this empty file. The
+# structured selected-package boundary in scripts/check-go-dependency-boundary
+# rejects golang.org/x/crypto/openpgp and every subpackage across Linux test,
+# release, and pinned tool graphs. Tracking:
+# https://github.com/EdmundFu-233/ReCasaOS-UserService/issues/1

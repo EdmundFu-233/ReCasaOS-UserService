@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
+	message_bus "github.com/EdmundFu-233/ReCasaOS-UserService/codegen/message_bus"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 	"github.com/IceWhaleTech/CasaOS-Common/external"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
-	message_bus "github.com/IceWhaleTech/CasaOS-UserService/codegen/message_bus"
-	"github.com/IceWhaleTech/CasaOS-UserService/model"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/config"
-	"github.com/IceWhaleTech/CasaOS-UserService/service"
 	"go.uber.org/zap"
 	"golang.org/x/net/websocket"
 )

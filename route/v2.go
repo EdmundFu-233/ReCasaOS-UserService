@@ -1,21 +1,18 @@
 package route
 
 import (
-	"crypto/ecdsa"
+	"context"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 
-	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
-	codegen "github.com/IceWhaleTech/CasaOS-UserService/codegen/user_service"
-	v2 "github.com/IceWhaleTech/CasaOS-UserService/route/v2"
-	"github.com/IceWhaleTech/CasaOS-UserService/service"
-	"github.com/deepmap/oapi-codegen/pkg/middleware"
+	codegen "github.com/EdmundFu-233/ReCasaOS-UserService/codegen/user_service"
+	v2 "github.com/EdmundFu-233/ReCasaOS-UserService/route/v2"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/labstack/echo/v4"
 	echo_middleware "github.com/labstack/echo/v4/middleware"
+	echomiddleware "github.com/oapi-codegen/echo-middleware"
 )
 
 var (
@@ -24,6 +21,8 @@ var (
 	V2APIPath string
 	V2DocPath string
 )
+
+const v2OpenAPISecuritySchemeName = "access_token"
 
 func init() {
 	swagger, err := codegen.GetSwagger()
@@ -58,39 +57,48 @@ func InitV2Router() http.Handler {
 
 	e.Use(echo_middleware.Gzip())
 
-	e.Use(echo_middleware.Logger())
+	e.Use(safeRequestLogger())
 
-	e.Use(echo_middleware.JWTWithConfig(echo_middleware.JWTConfig{
-		Skipper: func(c echo.Context) bool {
-			return c.RealIP() == "::1" || c.RealIP() == "127.0.0.1"
-		},
-		ParseTokenFunc: func(token string, c echo.Context) (interface{}, error) {
-			valid, claims, err := jwt.Validate(
-				token,
-				func() (*ecdsa.PublicKey, error) {
-					_, publicKey := service.MyService.User().GetKeyPair()
-					return publicKey, nil
-				})
-			if err != nil || !valid {
-				return nil, echo.ErrUnauthorized
-			}
+	e.Use(userAccessTokenMiddleware())
 
-			c.Request().Header.Set("user_id", strconv.Itoa(claims.ID))
-
-			return claims, nil
-		},
-		TokenLookupFuncs: []echo_middleware.ValuesExtractor{
-			func(c echo.Context) ([]string, error) {
-				return []string{c.Request().Header.Get(echo.HeaderAuthorization)}, nil
-			},
-		},
-	}))
-
-	e.Use(middleware.OapiRequestValidatorWithOptions(_swagger, &middleware.Options{Options: openapi3filter.Options{AuthenticationFunc: openapi3filter.NoopAuthenticationFunc}}))
+	e.Use(echomiddleware.OapiRequestValidatorWithOptions(
+		_swagger,
+		&echomiddleware.Options{Options: openapi3filter.Options{
+			AuthenticationFunc: v2OpenAPIAuthentication,
+		}},
+	))
 
 	codegen.RegisterHandlersWithBaseURL(e, UserService, V2APIPath)
 
 	return e
+}
+
+func v2OpenAPIAuthentication(
+	ctx context.Context,
+	input *openapi3filter.AuthenticationInput,
+) error {
+	if input == nil ||
+		input.RequestValidationInput == nil ||
+		input.RequestValidationInput.Request == nil ||
+		input.SecuritySchemeName != v2OpenAPISecuritySchemeName ||
+		input.SecurityScheme == nil ||
+		input.SecurityScheme.Type != "apiKey" ||
+		input.SecurityScheme.In != "header" ||
+		input.SecurityScheme.Name != echo.HeaderAuthorization ||
+		len(input.Scopes) != 0 {
+		return echo.ErrUnauthorized
+	}
+
+	echoContext := echomiddleware.GetEchoContext(ctx)
+	if echoContext == nil || echoContext.Request() == nil ||
+		echoContext.Request() != input.RequestValidationInput.Request {
+		return echo.ErrUnauthorized
+	}
+	authentication, ok := echoContext.Get(userAuthenticationContextKey).(userAuthentication)
+	if !ok || authentication.request != echoContext.Request() {
+		return echo.ErrUnauthorized
+	}
+	return nil
 }
 
 func InitV2DocRouter(docHTML string, docYAML string) http.Handler {

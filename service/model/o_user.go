@@ -11,10 +11,10 @@ package model
 
 import "time"
 
-//Soon to be removed
+// Soon to be removed
 type UserDBModel struct {
 	Id          int       `gorm:"column:id;primary_key" json:"id"`
-	Username    string    `json:"username"`
+	Username    string    `gorm:"uniqueIndex:idx_o_users_username" json:"username"`
 	Password    string    `json:"password,omitempty"`
 	Role        string    `json:"role"`
 	Email       string    `json:"email"`

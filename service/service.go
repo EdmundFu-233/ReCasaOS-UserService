@@ -1,9 +1,10 @@
 package service
 
 import (
+	"github.com/EdmundFu-233/ReCasaOS-UserService/codegen/message_bus"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
 	"github.com/IceWhaleTech/CasaOS-Common/external"
-	"github.com/IceWhaleTech/CasaOS-UserService/codegen/message_bus"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/config"
 	"gorm.io/gorm"
 )
 
@@ -16,7 +17,7 @@ type Repository interface {
 	Event() EventService
 }
 
-func NewService(db *gorm.DB, RuntimePath string) Repository {
+func NewService(db *gorm.DB, RuntimePath string, initializationState userbootstrap.State) Repository {
 
 	gatewayManagement, err := external.NewManagementService(RuntimePath)
 	if err != nil {
@@ -25,7 +26,7 @@ func NewService(db *gorm.DB, RuntimePath string) Repository {
 
 	return &store{
 		gateway: gatewayManagement,
-		user:    NewUserService(db),
+		user:    NewUserService(db, initializationState),
 		event:   NewEventService(db),
 	}
 }

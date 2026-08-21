@@ -3,85 +3,47 @@ package v1
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	json2 "encoding/json"
-	"image"
-	"image/png"
+	"errors"
 	"io"
-	"log"
 	"net/http"
-	url2 "net/url"
 	"os"
-	"path"
-	"path/filepath"
-	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/IceWhaleTech/CasaOS-Common/external"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/common"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model/system_model"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/authsecurity"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/utils/file"
+	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/common_err"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
-	"github.com/IceWhaleTech/CasaOS-UserService/common"
-	"github.com/IceWhaleTech/CasaOS-UserService/model"
-	"github.com/IceWhaleTech/CasaOS-UserService/model/system_model"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/config"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/encryption"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/file"
-	model2 "github.com/IceWhaleTech/CasaOS-UserService/service/model"
 	"github.com/labstack/echo/v4"
-	uuid "github.com/satori/go.uuid"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
-	"github.com/IceWhaleTech/CasaOS-UserService/service"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 )
 
 // @Summary register user
 // @Router /user/register/ [post]
 func PostUserRegister(ctx echo.Context) error {
-	json := make(map[string]string)
-	ctx.Bind(&json)
-
-	username := json["username"]
-	pwd := json["password"]
-	key := json["key"]
-	if _, ok := service.UserRegisterHash[key]; !ok {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.KEY_NOT_EXIST, Message: common_err.GetMsg(common_err.KEY_NOT_EXIST)})
-	}
-
-	if len(username) == 0 || len(pwd) == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
-	}
-	if len(pwd) < 6 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.PWD_IS_TOO_SIMPLE, Message: common_err.GetMsg(common_err.PWD_IS_TOO_SIMPLE)})
-	}
-	oldUser := service.MyService.User().GetUserInfoByUserName(username)
-	if oldUser.Id > 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.USER_EXIST, Message: common_err.GetMsg(common_err.USER_EXIST)})
-	}
-
-	user := model2.UserDBModel{}
-	user.Username = username
-	user.Password = encryption.GetMD5ByStr(pwd)
-	user.Role = "admin"
-
-	user = service.MyService.User().CreateUser(user)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
-	}
-	file.MkDir(config.AppInfo.UserDataPath + "/" + strconv.Itoa(user.Id))
-	delete(service.UserRegisterHash, key)
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS)})
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	return ctx.JSON(http.StatusGone, model.Result{
+		Success: http.StatusGone,
+		Message: "network registration is disabled; initialize the administrator locally",
+	})
 }
 
 var limiter = rate.NewLimiter(rate.Every(time.Minute), 5)
+
+const maxLoginRequestBodyBytes = 4 << 10
 
 // @Summary login
 // @Produce  application/json
@@ -92,6 +54,8 @@ var limiter = rate.NewLimiter(rate.Every(time.Minute), 5)
 // @Success 200 {string} string "ok"
 // @Router /user/login [post]
 func PostUserLogin(ctx echo.Context) error {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
 	if !limiter.Allow() {
 		return ctx.JSON(common_err.TOO_MANY_REQUEST,
 			model.Result{
@@ -100,12 +64,24 @@ func PostUserLogin(ctx echo.Context) error {
 			})
 	}
 
-	json := make(map[string]string)
-	ctx.Bind(&json)
+	requestBody := http.MaxBytesReader(ctx.Response(), ctx.Request().Body, maxLoginRequestBodyBytes)
+	decoder := json2.NewDecoder(requestBody)
+	decoder.DisallowUnknownFields()
+	var request struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decoder.Decode(&request); err != nil {
+		return ctx.JSON(common_err.CLIENT_ERROR,
+			model.Result{Success: common_err.CLIENT_ERROR, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return ctx.JSON(common_err.CLIENT_ERROR,
+			model.Result{Success: common_err.CLIENT_ERROR, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
+	}
 
-	username := json["username"]
-
-	password := json["password"]
+	username := request.Username
+	password := request.Password
 	// check params is empty
 	if len(username) == 0 || len(password) == 0 {
 		return ctx.JSON(common_err.CLIENT_ERROR,
@@ -114,29 +90,36 @@ func PostUserLogin(ctx echo.Context) error {
 				Message: common_err.GetMsg(common_err.INVALID_PARAMS),
 			})
 	}
-	user := service.MyService.User().GetUserAllInfoByName(username)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR,
-			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	if user.Password != encryption.GetMD5ByStr(password) {
+	user, err := service.MyService.User().AuthenticateUser(username, []byte(password))
+	if errors.Is(err, service.ErrInvalidCredentials) {
 		return ctx.JSON(common_err.CLIENT_ERROR,
 			model.Result{Success: common_err.USER_NOT_EXIST_OR_PWD_INVALID, Message: common_err.GetMsg(common_err.USER_NOT_EXIST_OR_PWD_INVALID)})
 	}
+	if err != nil {
+		logger.Error("authenticate user", zap.Error(err))
+		return ctx.JSON(http.StatusInternalServerError,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	}
 
 	privateKey, _ := service.MyService.User().GetKeyPair()
+	if privateKey == nil {
+		return ctx.JSON(http.StatusInternalServerError,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	}
 
 	token := system_model.VerifyInformation{}
 
 	accessToken, err := jwt.GetAccessToken(user.Username, privateKey, user.Id)
 	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: err.Error()})
+		return ctx.JSON(http.StatusInternalServerError,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
 	token.AccessToken = accessToken
 
 	refreshToken, err := jwt.GetRefreshToken(user.Username, privateKey, user.Id)
 	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: err.Error()})
+		return ctx.JSON(http.StatusInternalServerError,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
 	token.RefreshToken = refreshToken
 
@@ -165,49 +148,7 @@ func PostUserLogin(ctx echo.Context) error {
 // @Success 200 {string} string "ok"
 // @Router /users/avatar [put]
 func PutUserAvatar(ctx echo.Context) error {
-	id := ctx.Request().Header.Get("user_id")
-	user := service.MyService.User().GetUserInfoById(id)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR,
-			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	json := make(map[string]string)
-	ctx.Bind(&json)
-
-	data := json["file"]
-	imgBase64 := strings.Replace(data, "data:image/png;base64,", "", 1)
-	decodeData, err := base64.StdEncoding.DecodeString(string(imgBase64))
-	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: err.Error()})
-	}
-
-	// 将字节数组转为图片
-	img, _, err := image.Decode(strings.NewReader(string(decodeData)))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	ext := ".png"
-	avatarPath := config.AppInfo.UserDataPath + "/" + id + "/avatar" + ext
-	os.Remove(avatarPath)
-	outFile, err := os.Create(avatarPath)
-	if err != nil {
-		logger.Error("create file error", zap.Error(err))
-	}
-	defer outFile.Close()
-
-	err = png.Encode(outFile, img)
-	if err != nil {
-		logger.Error("encode error", zap.Error(err))
-	}
-	user.Avatar = avatarPath
-	service.MyService.User().UpdateUser(user)
-	return ctx.JSON(http.StatusOK,
-		model.Result{
-			Success: common_err.SUCCESS,
-			Message: common_err.GetMsg(common_err.SUCCESS),
-			Data:    user,
-		})
+	return legacyImageEndpointGone(ctx)
 }
 
 // @Summary get user head
@@ -218,30 +159,7 @@ func PutUserAvatar(ctx echo.Context) error {
 // @Success 200 {string} string "ok"
 // @Router /users/avatar [get]
 func GetUserAvatar(ctx echo.Context) error {
-	id := ctx.Request().Header.Get("user_id")
-	user := service.MyService.User().GetUserInfoById(id)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR,
-			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-
-	if file.Exists(user.Avatar) {
-		ctx.Response().Header().Set("Content-Disposition", "attachment; filename*=utf-8''"+url2.PathEscape(path.Base(user.Avatar)))
-		ctx.Response().Header().Set("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate, value")
-		return ctx.File(user.Avatar)
-
-	}
-	user.Avatar = "/usr/share/casaos/www/avatar.svg"
-	if file.Exists(user.Avatar) {
-		ctx.Response().Header().Set("Content-Disposition", "attachment; filename*=utf-8''"+url2.PathEscape(path.Base(user.Avatar)))
-		ctx.Response().Header().Set("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate, value")
-		return ctx.File(user.Avatar)
-
-	}
-	user.Avatar = "/var/lib/casaos/www/avatar.svg"
-	ctx.Response().Header().Set("Content-Disposition", "attachment; filename*=utf-8''"+url2.PathEscape(path.Base(user.Avatar)))
-	ctx.Response().Header().Set("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate, value")
-	return ctx.File(user.Avatar)
+	return legacyImageEndpointGone(ctx)
 }
 
 // @Summary edit user name
@@ -254,38 +172,60 @@ func GetUserAvatar(ctx echo.Context) error {
 // @Router /user/name/:id [put]
 func PutUserInfo(ctx echo.Context) error {
 	id := ctx.Request().Header.Get("user_id")
-	json := model2.UserDBModel{}
-	ctx.Bind(&json)
+	requested := userProfileUpdate{}
+	if err := ctx.Bind(&requested); err != nil {
+		return ctx.JSON(common_err.CLIENT_ERROR,
+			model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
+	}
 	user := service.MyService.User().GetUserInfoById(id)
 	if user.Id == 0 {
 		return ctx.JSON(common_err.SERVICE_ERROR,
 			model.Result{Success: common_err.USER_NOT_EXIST_OR_PWD_INVALID, Message: common_err.GetMsg(common_err.USER_NOT_EXIST_OR_PWD_INVALID)})
 	}
-	if len(json.Username) > 0 {
-		u := service.MyService.User().GetUserInfoByUserName(json.Username)
-		if u.Id > 0 {
+	if len(requested.Username) > 0 {
+		u := service.MyService.User().GetUserInfoByUserName(requested.Username)
+		if u.Id > 0 && u.Id != user.Id {
 			return ctx.JSON(common_err.CLIENT_ERROR,
 				model.Result{Success: common_err.USER_EXIST, Message: common_err.GetMsg(common_err.USER_EXIST)})
 		}
 	}
 
-	if len(json.Email) == 0 {
-		json.Email = user.Email
+	updated := model2.UserDBModel{
+		Id:          user.Id,
+		Username:    firstNonEmpty(requested.Username, user.Username),
+		Role:        user.Role,
+		Email:       firstNonEmpty(requested.Email, user.Email),
+		Nickname:    firstNonEmpty(requested.Nickname, user.Nickname),
+		Avatar:      firstNonEmpty(requested.Avatar, user.Avatar),
+		Description: firstNonEmpty(requested.Description, user.Description),
 	}
-	if len(json.Avatar) == 0 {
-		json.Avatar = user.Avatar
+	service.MyService.User().UpdateUser(updated)
+	publicUser := service.MyService.User().GetUserInfoById(id)
+	if publicUser.Id != user.Id {
+		return ctx.JSON(http.StatusInternalServerError,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
-	if len(json.Role) == 0 {
-		json.Role = user.Role
+	publicUser.Password = ""
+	return ctx.JSON(common_err.SUCCESS, model.Result{
+		Success: common_err.SUCCESS,
+		Message: common_err.GetMsg(common_err.SUCCESS),
+		Data:    publicUser,
+	})
+}
+
+type userProfileUpdate struct {
+	Username    string `json:"username"`
+	Email       string `json:"email"`
+	Nickname    string `json:"nickname"`
+	Avatar      string `json:"avatar"`
+	Description string `json:"description"`
+}
+
+func firstNonEmpty(candidate, fallback string) string {
+	if candidate != "" {
+		return candidate
 	}
-	if len(json.Description) == 0 {
-		json.Description = user.Description
-	}
-	if len(json.Nickname) == 0 {
-		json.Nickname = user.Nickname
-	}
-	service.MyService.User().UpdateUser(json)
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: json})
+	return fallback
 }
 
 // @Summary edit user password
@@ -304,16 +244,18 @@ func PutUserPassword(ctx echo.Context) error {
 	if len(oldPwd) == 0 || len(pwd) == 0 {
 		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
 	}
-	user := service.MyService.User().GetUserAllInfoById(id)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR,
-			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	if user.Password != encryption.GetMD5ByStr(oldPwd) {
+	err := service.MyService.User().ChangeUserPassword(id, []byte(oldPwd), []byte(pwd))
+	if errors.Is(err, service.ErrInvalidCredentials) {
 		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.PWD_INVALID_OLD, Message: common_err.GetMsg(common_err.PWD_INVALID_OLD)})
 	}
-	user.Password = encryption.GetMD5ByStr(pwd)
-	service.MyService.User().UpdateUserPassword(user)
+	if errors.Is(err, service.ErrWeakPassword) {
+		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.PWD_IS_TOO_SIMPLE, Message: common_err.GetMsg(common_err.PWD_IS_TOO_SIMPLE)})
+	}
+	if err != nil {
+		logger.Error("change user password", zap.Error(err))
+		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	}
+	user := service.MyService.User().GetUserInfoById(id)
 	user.Password = ""
 	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: user})
 }
@@ -498,10 +440,16 @@ func PostUserCustomConf(ctx echo.Context) error {
 		dataMap["system"] = string(data)
 		response, err := service.MyService.MessageBus().PublishEventWithResponse(context.Background(), common.SERVICENAME, "zimaos:user:save_config", dataMap)
 		if err != nil {
-			logger.Error("failed to publish event to message bus", zap.Error(err), zap.Any("event", string(data)))
-		}
-		if response.StatusCode() != http.StatusOK {
-			logger.Error("failed to publish event to message bus", zap.String("status", response.Status()), zap.Any("response", response))
+			logger.Error("failed to publish user configuration event",
+				zap.String("event", "zimaos:user:save_config"),
+				zap.Error(err))
+		} else if response == nil {
+			logger.Error("user configuration event returned no response",
+				zap.String("event", "zimaos:user:save_config"))
+		} else if response.StatusCode() != http.StatusOK {
+			logger.Error("user configuration event returned a non-success status",
+				zap.String("event", "zimaos:user:save_config"),
+				zap.Int("status", response.StatusCode()))
 		}
 
 	}
@@ -542,7 +490,17 @@ func DeleteUserCustomConf(ctx echo.Context) error {
  */
 func DeleteUser(ctx echo.Context) error {
 	id := ctx.Param("id")
-	service.MyService.User().DeleteUserById(id)
+	err := service.MyService.User().DeleteUserById(id)
+	if errors.Is(err, service.ErrLastAdmin) {
+		return ctx.JSON(http.StatusConflict, model.Result{Success: http.StatusConflict, Message: "at least one administrator must remain"})
+	}
+	if errors.Is(err, service.ErrUserNotFound) {
+		return ctx.JSON(http.StatusNotFound, model.Result{Success: http.StatusNotFound, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
+	}
+	if err != nil {
+		logger.Error("delete user", zap.Error(err))
+		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	}
 	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: id})
 }
 
@@ -552,41 +510,7 @@ func DeleteUser(ctx echo.Context) error {
  * @router:/user/current/image/:key
  */
 func PutUserImage(ctx echo.Context) error {
-	id := ctx.Request().Header.Get("user_id")
-	json := make(map[string]string)
-	ctx.Bind(&json)
-
-	path := json["path"]
-	key := ctx.Param("key")
-	if len(path) == 0 || len(key) == 0 {
-		return ctx.JSON(http.StatusOK, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
-	}
-	if !file.Exists(path) {
-		return ctx.JSON(http.StatusOK, model.Result{Success: common_err.FILE_DOES_NOT_EXIST, Message: common_err.GetMsg(common_err.FILE_DOES_NOT_EXIST)})
-	}
-
-	_, err := file.GetImageExt(path)
-	if err != nil {
-		return ctx.JSON(http.StatusOK, model.Result{Success: common_err.NOT_IMAGE, Message: common_err.GetMsg(common_err.NOT_IMAGE)})
-	}
-
-	user := service.MyService.User().GetUserInfoById(id)
-	if user.Id == 0 {
-		return ctx.JSON(http.StatusOK, model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	fstat, _ := os.Stat(path)
-	if fstat.Size() > 10<<20 {
-		return ctx.JSON(http.StatusOK, model.Result{Success: common_err.IMAGE_TOO_LARGE, Message: common_err.GetMsg(common_err.IMAGE_TOO_LARGE)})
-	}
-	ext := file.GetExt(path)
-	filePath := config.AppInfo.UserDataPath + "/" + strconv.Itoa(user.Id) + "/" + key + ext
-	file.CopySingleFile(path, filePath, "overwrite")
-
-	data := make(map[string]string, 3)
-	data["path"] = filePath
-	data["file_name"] = key + ext
-	data["online_path"] = "/v1/users/image?path=" + filePath
-	return ctx.JSON(http.StatusOK, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: data})
+	return legacyImageEndpointGone(ctx)
 }
 
 /**
@@ -600,39 +524,7 @@ func PutUserImage(ctx echo.Context) error {
 * @router:
  */
 func PostUserUploadImage(ctx echo.Context) error {
-	id := ctx.Request().Header.Get("user_id")
-	f, err := ctx.FormFile("file")
-	key := ctx.Param("key")
-	t := ctx.FormValue("type")
-	if len(key) == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
-	}
-	if err != nil {
-		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.CLIENT_ERROR, Message: common_err.GetMsg(common_err.CLIENT_ERROR), Data: err.Error()})
-	}
-
-	_, err = file.GetImageExtByName(f.Filename)
-	if err != nil {
-		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.NOT_IMAGE, Message: common_err.GetMsg(common_err.NOT_IMAGE)})
-	}
-	ext := filepath.Ext(f.Filename)
-	user := service.MyService.User().GetUserInfoById(id)
-
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	if t == "avatar" {
-		key = "avatar"
-	}
-	path := config.AppInfo.UserDataPath + "/" + strconv.Itoa(user.Id) + "/" + key + ext
-
-	file.SaveUploadedFile(f, path)
-
-	data := make(map[string]string, 3)
-	data["path"] = path
-	data["file_name"] = key + ext
-	data["online_path"] = "/v1/users/image?path=" + path
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: data})
+	return legacyImageEndpointGone(ctx)
 }
 
 /**
@@ -641,54 +533,21 @@ func PostUserUploadImage(ctx echo.Context) error {
  * @router:/user/image/:id
  */
 func GetUserImage(ctx echo.Context) error {
-	filePath := ctx.QueryParam("path")
-	if len(filePath) == 0 {
-		return ctx.JSON(http.StatusNotFound, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
-	}
-	absFilePath, err := filepath.Abs(filepath.Clean(filePath))
-	if err != nil {
-		return ctx.JSON(http.StatusNotFound, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
-	}
-	if !file.Exists(absFilePath) {
-		return ctx.JSON(http.StatusNotFound, model.Result{Success: common_err.FILE_DOES_NOT_EXIST, Message: common_err.GetMsg(common_err.FILE_DOES_NOT_EXIST)})
-	}
-	if !strings.Contains(absFilePath, config.AppInfo.UserDataPath) {
-		return ctx.JSON(http.StatusNotFound, model.Result{Success: common_err.INSUFFICIENT_PERMISSIONS, Message: common_err.GetMsg(common_err.INSUFFICIENT_PERMISSIONS)})
-	}
-
-	matched, err := regexp.MatchString(`^/var/lib/casaos/\d`, absFilePath)
-	if err != nil {
-		return ctx.JSON(http.StatusNotFound, model.Result{Success: common_err.INSUFFICIENT_PERMISSIONS, Message: common_err.GetMsg(common_err.INSUFFICIENT_PERMISSIONS)})
-	}
-	if !matched {
-		return ctx.JSON(http.StatusNotFound, model.Result{Success: common_err.INSUFFICIENT_PERMISSIONS, Message: common_err.GetMsg(common_err.INSUFFICIENT_PERMISSIONS)})
-	}
-
-	fileName := path.Base(absFilePath)
-
-	// @tiger - RESTful 规范下不应该返回文件本身内容，而是返回文件的静态URL，由前端去解析
-	ctx.Response().Header().Set("Content-Disposition", "attachment; filename*=utf-8''"+url2.PathEscape(fileName))
-	return ctx.File(absFilePath)
+	return legacyImageEndpointGone(ctx)
 }
 
 func DeleteUserImage(ctx echo.Context) error {
-	id := ctx.Request().Header.Get("user_id")
-	path := ctx.QueryParam("path")
-	if len(path) == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
-	}
-	user := service.MyService.User().GetUserInfoById(id)
-	if user.Id == 0 {
-		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
-	}
-	if !file.Exists(path) {
-		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.FILE_DOES_NOT_EXIST, Message: common_err.GetMsg(common_err.FILE_DOES_NOT_EXIST)})
-	}
-	if !strings.Contains(path, config.AppInfo.UserDataPath+"/"+strconv.Itoa(user.Id)) {
-		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.INSUFFICIENT_PERMISSIONS, Message: common_err.GetMsg(common_err.INSUFFICIENT_PERMISSIONS)})
-	}
-	os.Remove(path)
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS)})
+	return legacyImageEndpointGone(ctx)
+}
+
+func legacyImageEndpointGone(ctx echo.Context) error {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	ctx.Response().Header().Set(echo.HeaderXContentTypeOptions, "nosniff")
+	return ctx.JSON(http.StatusGone, model.Result{
+		Success: http.StatusGone,
+		Message: "legacy path-based image endpoints are disabled",
+	})
 }
 
 /**
@@ -700,47 +559,95 @@ func DeleteUserImage(ctx echo.Context) error {
  * @router:
  */
 func PostUserRefreshToken(ctx echo.Context) error {
-	js := make(map[string]string)
-	ctx.Bind(&js)
-	refresh := js["refresh_token"]
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
 
-	privateKey, _ := service.MyService.User().GetKeyPair()
+	requestBody := http.MaxBytesReader(ctx.Response(), ctx.Request().Body, maxRefreshRequestBodyBytes)
+	decoder := json2.NewDecoder(requestBody)
+	decoder.DisallowUnknownFields()
+	var request struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := decoder.Decode(&request); err != nil {
+		return refreshUnauthorized(ctx)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return refreshUnauthorized(ctx)
+	}
 
-	claims, err := jwt.ParseToken(
-		refresh,
-		func() (*ecdsa.PublicKey, error) {
-			_, publicKey := service.MyService.User().GetKeyPair()
-			return publicKey, nil
+	verifyInfo, err := issueRefreshedTokens(request.RefreshToken, service.MyService.User())
+	if errors.Is(err, errInvalidRefreshSession) {
+		return refreshUnauthorized(ctx)
+	}
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, model.Result{
+			Success: common_err.SERVICE_ERROR,
+			Message: common_err.GetMsg(common_err.SERVICE_ERROR),
 		})
-	if err != nil {
-		return ctx.JSON(http.StatusUnauthorized, model.Result{Success: common_err.VERIFICATION_FAILURE, Message: common_err.GetMsg(common_err.VERIFICATION_FAILURE), Data: err.Error()})
 	}
-	if !claims.VerifyExpiresAt(time.Now(), true) || !claims.VerifyIssuer("refresh", true) {
-		return ctx.JSON(http.StatusUnauthorized, model.Result{Success: common_err.VERIFICATION_FAILURE, Message: common_err.GetMsg(common_err.VERIFICATION_FAILURE)})
+	return ctx.JSON(common_err.SUCCESS, model.Result{
+		Success: common_err.SUCCESS,
+		Message: common_err.GetMsg(common_err.SUCCESS),
+		Data:    verifyInfo,
+	})
+}
+
+const maxRefreshRequestBodyBytes = 12 << 10
+
+var (
+	errInvalidRefreshSession = errors.New("invalid refresh session")
+	errRefreshSigning        = errors.New("refresh token signing failed")
+)
+
+type refreshTokenUserService interface {
+	GetKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey)
+	GetUserInfoById(string) model2.UserDBModel
+}
+
+func issueRefreshedTokens(refresh string, users refreshTokenUserService) (system_model.VerifyInformation, error) {
+	if users == nil {
+		return system_model.VerifyInformation{}, errRefreshSigning
+	}
+	privateKey, publicKey := users.GetKeyPair()
+	if privateKey == nil || publicKey == nil {
+		return system_model.VerifyInformation{}, errRefreshSigning
+	}
+	claims, err := authsecurity.ValidateRefreshToken(refresh, func() (*ecdsa.PublicKey, error) {
+		return publicKey, nil
+	})
+	if err != nil {
+		return system_model.VerifyInformation{}, errInvalidRefreshSession
+	}
+	user := users.GetUserInfoById(strconv.Itoa(claims.ID))
+	if user.Id != claims.ID || user.Username != claims.Username {
+		return system_model.VerifyInformation{}, errInvalidRefreshSession
 	}
 
-	newAccessToken, err := jwt.GetAccessToken(claims.Username, privateKey, claims.ID)
+	newAccessToken, err := jwt.GetAccessToken(user.Username, privateKey, user.Id)
 	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: err.Error()})
+		return system_model.VerifyInformation{}, errRefreshSigning
 	}
-
-	newRefreshToken, err := jwt.GetRefreshToken(claims.Username, privateKey, claims.ID)
+	newRefreshToken, err := jwt.GetRefreshToken(user.Username, privateKey, user.Id)
 	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError, model.Result{Success: common_err.SERVICE_ERROR, Message: err.Error()})
+		return system_model.VerifyInformation{}, errRefreshSigning
 	}
-
-	verifyInfo := system_model.VerifyInformation{
+	return system_model.VerifyInformation{
 		AccessToken:  newAccessToken,
 		RefreshToken: newRefreshToken,
 		ExpiresAt:    time.Now().Add(3 * time.Hour).Unix(),
-	}
+	}, nil
+}
 
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: verifyInfo})
+func refreshUnauthorized(ctx echo.Context) error {
+	return ctx.JSON(http.StatusUnauthorized, model.Result{
+		Success: common_err.VERIFICATION_FAILURE,
+		Message: common_err.GetMsg(common_err.VERIFICATION_FAILURE),
+	})
 }
 
 func DeleteUserAll(ctx echo.Context) error {
-	service.MyService.User().DeleteAllUser()
-	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS)})
+	_ = service.MyService.User().DeleteAllUser()
+	return ctx.JSON(http.StatusConflict, model.Result{Success: http.StatusConflict, Message: "bulk user deletion is disabled"})
 }
 
 // @Summary 检查是否进入引导状态
@@ -751,22 +658,24 @@ func DeleteUserAll(ctx echo.Context) error {
 // @Success 200 {string} string "ok"
 // @Router /sys/init/check [get]
 func GetUserStatus(ctx echo.Context) error {
-	data := make(map[string]interface{}, 2)
+	return getUserStatus(ctx, service.MyService.User())
+}
 
-	if service.MyService.User().GetUserCount() > 0 {
-		data["initialized"] = true
-		data["key"] = ""
-	} else {
-		key := uuid.NewV4().String()
-		service.UserRegisterHash[key] = key
-		data["key"] = key
-		data["initialized"] = false
-	}
-	gpus, err := external.NvidiaGPUInfoList()
+type initializationStateReader interface {
+	GetInitializationState(context.Context) (userbootstrap.State, error)
+}
+
+func getUserStatus(ctx echo.Context, reader initializationStateReader) error {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	state, err := reader.GetInitializationState(ctx.Request().Context())
 	if err != nil {
-		logger.Error("NvidiaGPUInfoList error", zap.Error(err))
+		return ctx.JSON(http.StatusServiceUnavailable,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
-	data["gpus"] = len(gpus)
+	data := map[string]bool{
+		"initialized": state.Initialized(),
+	}
 	return ctx.JSON(common_err.SUCCESS,
 		model.Result{
 			Success: common_err.SUCCESS,

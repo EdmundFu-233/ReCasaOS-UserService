@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-policy:
+    name: Workflow policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test policy checker
+        shell: bash
+        run: bash scripts/tests/check-workflow-policy_test.sh
+      - name: Enforce repository workflow policy
+        shell: bash
+        run: bash scripts/check-workflow-policy.sh
+
+  go:
+    name: Go 1.26.6
+    needs:
+      - workflow-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          check-latest: false
+          cache: false
+      - name: Install isolated Debian VM tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cloud-image-utils qemu-system-x86 qemu-utils
+      - name: Verify reviewed VM harness before executing pull request code
+        shell: bash
+        run: |
+          printf '%s  %s\n' \
+            '8bb5ea20ca4f01bb5f6af7f782058093223c0bd154cef238181aba626f45cc01' 'scripts/tests/check-debian11-systemd-vm.sh' \
+            '32c8a77d66ef4953355338c4fc532f9bf94e39f469b4ac5ef11d627f9a9e8519' 'scripts/tests/test-systemd-lifecycle.sh' |
+            sha256sum --check --strict
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Exercise local administrator lifecycle under systemd 247 PID 1
+        shell: bash
+        run: bash scripts/tests/check-debian11-systemd-vm.sh
+      - name: Verify module graph
+        shell: bash
+        run: go mod tidy -diff
+      - name: Preflight selected Go tool package boundary
+        shell: bash
+        run: bash scripts/check-go-dependency-boundary.sh --tools-only
+      - name: Generate APIs and verify tracked outputs
+        shell: bash
+        run: |
+          go generate ./...
+          git diff --exit-code -- codegen/
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Enforce Linux test, release, and tool package boundaries
+        shell: bash
+        run: bash scripts/check-go-dependency-boundary.sh --all
+      - name: Enforce dependency license policy
+        shell: bash
+        run: go tool go-licenses check --include_tests ./... tool
+      - name: Race tests
+        shell: bash
+        run: go test -race -count=1 ./...
+      - name: Vet
+        shell: bash
+        run: go vet ./...
+      - name: Reachable vulnerability policy
+        shell: bash
+        run: |
+          bash scripts/tests/check-govuln-policy_test.sh
+          set -o pipefail
+          go tool govulncheck -json ./... |
+            go run ./scripts/govuln-policy.go security/govuln-allowlist.txt

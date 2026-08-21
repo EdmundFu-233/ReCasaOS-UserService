@@ -10,40 +10,186 @@
 package sqlite
 
 import (
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
-	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
-	"github.com/IceWhaleTech/CasaOS-UserService/model"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/file"
-	model2 "github.com/IceWhaleTech/CasaOS-UserService/service/model"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model"
+	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/glebarez/sqlite"
-	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-var gdb *gorm.DB
+const databaseFilename = "user.db"
 
-func GetDb(dbPath string) *gorm.DB {
-	if gdb != nil {
-		return gdb
+// GetDb opens and migrates an isolated user database. The directory and
+// database contain password verifiers and are therefore always owner-only.
+// Initialization errors are returned to the caller instead of being logged and
+// ignored or panicking inside this package.
+func GetDb(dbPath string) (*gorm.DB, error) {
+	return openDb(dbPath, true, true)
+}
+
+// GetExistingDb opens an existing database without creating a directory or
+// database file. Local recovery commands use it so a mistyped path cannot
+// create a second empty user database.
+func GetExistingDb(dbPath string) (*gorm.DB, error) {
+	return openDb(dbPath, false, false)
+}
+
+// GetBootstrapDb atomically claims a new database with O_CREATE|O_EXCL and
+// migrates only the file created by that call. Once a bootstrap attempt has
+// created the database, every replay opens it in mode=rw without AutoMigrate so
+// rejecting an already-initialized installation cannot rewrite SQLite schema
+// bytes before the state check.
+// An existing empty or legacy-shaped file is never silently promoted by this
+// local first-administrator command.
+func GetBootstrapDb(dbPath string) (*gorm.DB, error) {
+	if strings.TrimSpace(dbPath) == "" {
+		return nil, errors.New("database directory is empty")
+	}
+	if err := secureDirectory(dbPath, true); err != nil {
+		return nil, err
+	}
+	databasePath := filepath.Join(dbPath, databaseFilename)
+	file, err := os.OpenFile(databasePath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, fmt.Errorf("close new bootstrap database: %w", closeErr)
+		}
+		return openDb(dbPath, false, true)
+	}
+	if !os.IsExist(err) {
+		return nil, fmt.Errorf("create bootstrap database exclusively: %w", err)
+	}
+	return openDb(dbPath, false, false)
+}
+
+func openDb(dbPath string, create, migrate bool) (*gorm.DB, error) {
+	if strings.TrimSpace(dbPath) == "" {
+		return nil, errors.New("database directory is empty")
+	}
+	if err := secureDirectory(dbPath, create); err != nil {
+		return nil, err
 	}
 
-	file.IsNotExistMkDir(dbPath)
-	db, err := gorm.Open(sqlite.Open(dbPath+"/user.db"), &gorm.Config{})
+	databasePath := filepath.Join(dbPath, databaseFilename)
+	if err := secureDatabaseFile(databasePath, create); err != nil {
+		return nil, err
+	}
+
+	// _pragma is applied to every connection opened by modernc SQLite, which
+	// gives concurrent BEGIN IMMEDIATE callers a bounded chance to serialize.
+	dsnURL := &url.URL{Scheme: "file", Path: databasePath}
+	query := dsnURL.Query()
+	if !create {
+		query.Add("mode", "rw")
+	}
+	query.Add("_pragma", "busy_timeout=5000")
+	query.Add("_pragma", "foreign_keys=1")
+	dsnURL.RawQuery = query.Encode()
+	dsn := dsnURL.String()
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("open user database: %w", err)
 	}
 
-	c, _ := db.DB()
-	c.SetMaxIdleConns(10)
-	c.SetMaxOpenConns(1)
-	c.SetConnMaxIdleTime(time.Second * 1000)
-
-	gdb = db
-
-	err = db.AutoMigrate(model2.UserDBModel{}, model.EventModel{})
+	sqlDB, err := db.DB()
 	if err != nil {
-		logger.Error("check or create db error", zap.Any("error", err))
+		return nil, fmt.Errorf("access user database pool: %w", err)
 	}
-	return db
+	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetMaxOpenConns(8)
+	sqlDB.SetConnMaxIdleTime(time.Second * 1000)
+
+	closeOnError := func(err error) (*gorm.DB, error) {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+
+	if migrate {
+		if err := db.AutoMigrate(model2.UserDBModel{}, model2.BootstrapStateDBModel{}, model.EventModel{}); err != nil {
+			return closeOnError(fmt.Errorf("migrate user database: %w", err))
+		}
+	}
+	if err := os.Chmod(databasePath, 0o600); err != nil {
+		return closeOnError(fmt.Errorf("secure user database: %w", err))
+	}
+	return db, nil
+}
+
+func secureDirectory(path string, create bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect database directory: %w", err)
+		}
+		if !create {
+			return errors.New("user database directory does not exist")
+		}
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return fmt.Errorf("create database directory: %w", err)
+		}
+		info, err = os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("inspect created database directory: %w", err)
+		}
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("database directory must be a real directory, not a symlink")
+	}
+	if uid, ok := ownerUID(info); !ok || uid != uint32(os.Geteuid()) {
+		return errors.New("database directory has an unexpected owner")
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("secure database directory: %w", err)
+	}
+	return nil
+}
+
+func secureDatabaseFile(path string, create bool) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("user database must be a regular file, not a symlink")
+		}
+		if uid, ok := ownerUID(info); !ok || uid != uint32(os.Geteuid()) {
+			return errors.New("user database has an unexpected owner")
+		}
+	} else {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect user database: %w", err)
+		}
+		if !create {
+			return errors.New("user database file does not exist")
+		}
+	}
+
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
+	file, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		return fmt.Errorf("open user database bootstrap file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close user database bootstrap file: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("secure user database bootstrap file: %w", err)
+	}
+	return nil
+}
+
+func ownerUID(info os.FileInfo) (uint32, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
 }

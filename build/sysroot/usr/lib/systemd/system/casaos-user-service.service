@@ -1,6 +1,7 @@
 [Unit]
 After=casaos-message-bus.service
 Description=CasaOS User Service
+Conflicts=recasaos-user-bootstrap.service recasaos-user-password-reset.service
 
 [Service]
 ExecStartPre=/usr/bin/casaos-user-service -v
@@ -8,6 +9,7 @@ ExecStart=/usr/bin/casaos-user-service -c /etc/casaos/user-service.conf
 PIDFile=/var/run/casaos/user-service.pid
 Restart=always
 Type=notify
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

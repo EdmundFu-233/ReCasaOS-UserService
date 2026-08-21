@@ -4,8 +4,8 @@ project_name: casaos-user-service
 before:
   hooks:
     - go generate
-    - go run github.com/google/go-licenses@latest check . --disallowed_types=restricted
-    - go mod tidy
+    - go tool go-licenses check . --disallowed_types=restricted
+    - go mod tidy -diff
     - go test -race -v ./...
 builds:
   - id: casaos-user-service-amd64
@@ -179,8 +179,8 @@ changelog:
       - "^test:"
 release:
   github:
-    owner: IceWhaleTech
-    name: CasaOS-UserService
+    owner: EdmundFu-233
+    name: ReCasaOS-UserService
   draft: true
   prerelease: auto
   mode: replace
