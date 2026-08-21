@@ -20,6 +20,7 @@ import (
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/codegen/message_bus"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/common"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/authsecurity"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/processlock"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/sqlite"
@@ -138,7 +139,7 @@ func runServer(args []string, stdout, stderr io.Writer, effectiveUID int) error 
 
 	_, publicKey := service.MyService.User().GetKeyPair()
 
-	jswkJSON, err := jwt.GenerateJwksJSON(publicKey)
+	jswkJSON, err := authsecurity.GeneratePublicJWKS(publicKey)
 	if err != nil {
 		return fmt.Errorf("generate JWKS document: %w", err)
 	}
