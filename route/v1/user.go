@@ -6,8 +6,9 @@ import (
 	json2 "encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
-	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/authsecurity"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
-	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/utils/file"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userconfig"
 	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/common_err"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
@@ -44,6 +45,8 @@ func PostUserRegister(ctx echo.Context) error {
 var limiter = rate.NewLimiter(rate.Every(time.Minute), 5)
 
 const maxLoginRequestBodyBytes = 4 << 10
+
+var customConfigKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // @Summary login
 // @Produce  application/json
@@ -384,21 +387,27 @@ func GetUserAllUsername(ctx echo.Context) error {
  * @router: /user/custom/:key
  */
 func GetUserCustomConf(ctx echo.Context) error {
+	setCustomConfigResponseHeaders(ctx)
 	name := ctx.Param("key")
-	if len(name) == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
+	if !customConfigKeyPattern.MatchString(name) {
+		return invalidCustomConfigResponse(ctx)
+	}
+	if err := userconfig.ValidateKey(name); err != nil {
+		return invalidCustomConfigResponse(ctx)
 	}
 	id := ctx.Request().Header.Get("user_id")
-
 	user := service.MyService.User().GetUserInfoById(id)
-	//	user := service.MyService.User().GetUserInfoByUsername(Username)
 	if user.Id == 0 {
 		return ctx.JSON(common_err.SERVICE_ERROR,
 			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
 	}
-	filePath := config.AppInfo.UserDataPath + "/" + id + "/" + name + ".json"
-
-	data := file.ReadFullFile(filePath)
+	data, err := userconfig.Read(config.AppInfo.UserDataPath, user.Id, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		data = []byte("")
+	} else if err != nil {
+		return ctx.JSON(common_err.SERVICE_ERROR,
+			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	}
 	if !gjson.ValidBytes(data) {
 		return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS), Data: string(data)})
 	}
@@ -412,9 +421,13 @@ func GetUserCustomConf(ctx echo.Context) error {
  * @router:/user/custom/:key
  */
 func PostUserCustomConf(ctx echo.Context) error {
+	setCustomConfigResponseHeaders(ctx)
 	name := ctx.Param("key")
-	if len(name) == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
+	if !customConfigKeyPattern.MatchString(name) {
+		return invalidCustomConfigResponse(ctx)
+	}
+	if err := userconfig.ValidateKey(name); err != nil {
+		return invalidCustomConfigResponse(ctx)
 	}
 	id := ctx.Request().Header.Get("user_id")
 	user := service.MyService.User().GetUserInfoById(id)
@@ -422,15 +435,17 @@ func PostUserCustomConf(ctx echo.Context) error {
 		return ctx.JSON(common_err.SERVICE_ERROR,
 			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
 	}
-	data, _ := io.ReadAll(ctx.Request().Body)
-	filePath := config.AppInfo.UserDataPath + "/" + strconv.Itoa(user.Id)
-
-	if err := file.IsNotExistMkDir(filePath); err != nil {
-		return ctx.JSON(common_err.SERVICE_ERROR,
-			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+	body := http.MaxBytesReader(ctx.Response(), ctx.Request().Body, userconfig.MaxConfigBytes)
+	data, err := io.ReadAll(body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return ctx.JSON(http.StatusRequestEntityTooLarge,
+				model.Result{Success: http.StatusRequestEntityTooLarge, Message: "custom configuration is too large"})
+		}
+		return invalidCustomConfigResponse(ctx)
 	}
-
-	if err := file.WriteToPath(data, filePath, name+".json"); err != nil {
+	if err := userconfig.Write(config.AppInfo.UserDataPath, user.Id, name, data); err != nil {
 		return ctx.JSON(common_err.SERVICE_ERROR,
 			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
@@ -464,9 +479,13 @@ func PostUserCustomConf(ctx echo.Context) error {
  * @router:/user/custom/:key
  */
 func DeleteUserCustomConf(ctx echo.Context) error {
+	setCustomConfigResponseHeaders(ctx)
 	name := ctx.Param("key")
-	if len(name) == 0 {
-		return ctx.JSON(common_err.CLIENT_ERROR, model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
+	if !customConfigKeyPattern.MatchString(name) {
+		return invalidCustomConfigResponse(ctx)
+	}
+	if err := userconfig.ValidateKey(name); err != nil {
+		return invalidCustomConfigResponse(ctx)
 	}
 	id := ctx.Request().Header.Get("user_id")
 	user := service.MyService.User().GetUserInfoById(id)
@@ -474,12 +493,21 @@ func DeleteUserCustomConf(ctx echo.Context) error {
 		return ctx.JSON(common_err.SERVICE_ERROR,
 			model.Result{Success: common_err.USER_NOT_EXIST, Message: common_err.GetMsg(common_err.USER_NOT_EXIST)})
 	}
-	filePath := config.AppInfo.UserDataPath + "/" + strconv.Itoa(user.Id) + "/" + name + ".json"
-	err := os.Remove(filePath)
-	if err != nil {
+	if err := userconfig.Delete(config.AppInfo.UserDataPath, user.Id, name); err != nil {
 		return ctx.JSON(common_err.SERVICE_ERROR, model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
 	return ctx.JSON(common_err.SUCCESS, model.Result{Success: common_err.SUCCESS, Message: common_err.GetMsg(common_err.SUCCESS)})
+}
+
+func invalidCustomConfigResponse(ctx echo.Context) error {
+	return ctx.JSON(common_err.CLIENT_ERROR,
+		model.Result{Success: common_err.INVALID_PARAMS, Message: common_err.GetMsg(common_err.INVALID_PARAMS)})
+}
+
+func setCustomConfigResponseHeaders(ctx echo.Context) {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	ctx.Response().Header().Set(echo.HeaderXContentTypeOptions, "nosniff")
 }
 
 /**
