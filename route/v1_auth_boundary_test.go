@@ -3,6 +3,7 @@ package route
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +31,29 @@ func TestUsernameListCannotBypassJWTWithLoopbackForwardingOrQueryToken(t *testin
 				t.Fatalf("status = %d, want 401; body=%s", recorder.Code, recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestLegacyPublicImagePathEndpointIsGone(t *testing.T) {
+	handler := InitRouter()
+	const secretPath = "/var/lib/casaos/1/system.json"
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/users/image?path="+secretPath+"&token=must-not-be-reflected",
+		nil,
+	)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Cache-Control") != "no-store" ||
+		recorder.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("security headers = %#v", recorder.Header())
+	}
+	for _, forbidden := range []string{secretPath, "system.json", "must-not-be-reflected"} {
+		if strings.Contains(recorder.Body.String(), forbidden) {
+			t.Fatalf("response reflected %q: %s", forbidden, recorder.Body.String())
+		}
 	}
 }

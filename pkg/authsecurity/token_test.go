@@ -44,6 +44,41 @@ func TestValidateAccessTokenSeparatesAccessAndRefreshTokens(t *testing.T) {
 	}
 }
 
+func TestValidateRefreshTokenRequiresRefreshClassAndStrictIdentity(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := func() (*ecdsa.PublicKey, error) {
+		return &privateKey.PublicKey, nil
+	}
+
+	refreshToken, err := commonjwt.GetRefreshToken("admin", privateKey, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := ValidateRefreshToken(refreshToken, publicKey)
+	if err != nil {
+		t.Fatalf("refresh token rejected: %v", err)
+	}
+	if claims.ID != 42 || claims.Username != "admin" {
+		t.Fatalf("unexpected claims: %#v", claims)
+	}
+
+	accessToken, err := commonjwt.GetAccessToken("admin", privateKey, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateRefreshToken(accessToken, publicKey); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Fatalf("access token error = %v, want ErrInvalidRefreshToken", err)
+	}
+	if _, err := ValidateRefreshToken(string(make([]byte, maxTokenSize+1)), publicKey); !errors.Is(err, ErrInvalidRefreshToken) {
+		t.Fatalf("oversized token error = %v, want ErrInvalidRefreshToken", err)
+	}
+}
+
 func TestValidateAccessTokenRequiresExactES256AndIdentity(t *testing.T) {
 	t.Parallel()
 

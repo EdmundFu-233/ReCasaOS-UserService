@@ -71,6 +71,8 @@ func TestRoutersWireAuthenticationBeforeProtectedHandlers(t *testing.T) {
 	}{
 		{name: "v1", handler: InitRouter(), path: "/v1/users/current"},
 		{name: "v2", handler: InitV2Router(), path: V2APIPath + "/events"},
+		{name: "v2 encoded uppercase slash", handler: InitV2Router(), path: V2APIPath + "/events%2Fextra"},
+		{name: "v2 encoded lowercase slash", handler: InitV2Router(), path: V2APIPath + "/events%2fextra"},
 	}
 	for _, test := range tests {
 		test := test
