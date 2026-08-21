@@ -1,0 +1,17 @@
+[Unit]
+Description=ReCasaOS one-time local administrator bootstrap
+Conflicts=casaos-user-service.service
+Before=casaos-user-service.service
+
+[Service]
+Type=oneshot
+LoadCredential=recasaos.admin.username
+LoadCredential=recasaos.admin.password
+ExecStart=/usr/bin/casaos-user-service bootstrap-admin -c /etc/casaos/user-service.conf
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+# This unit is intentionally not enabled. An administrator must explicitly
+# supply both credentials through systemd and start it locally.

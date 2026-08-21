@@ -13,6 +13,13 @@ ReCasaOS User Service provides CasaOS-compatible local user-management APIs.
 The Go module path remains `github.com/IceWhaleTech/CasaOS-UserService` for
 source compatibility while the fork is hardened.
 
+## Secure administrator bootstrap
+
+Network registration is intentionally disabled. New installations must create
+their first administrator through the root-only systemd credential workflow in
+[docs/security-bootstrap.md](docs/security-bootstrap.md). The legacy `-ru`
+password-printing workflow is also disabled.
+
 ## Security status
 
 Hardening is in progress under
