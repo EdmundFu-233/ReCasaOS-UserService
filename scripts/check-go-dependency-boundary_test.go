@@ -92,6 +92,41 @@ func TestSourceImportBoundaryRejectsWeakHashes(t *testing.T) {
 	}
 }
 
+func TestSourceImportBoundaryRejectsRemovedPathHelper(t *testing.T) {
+	t.Run("legacy import", func(t *testing.T) {
+		root := t.TempDir()
+		source := []byte("package safe\nimport _ \"" + forbiddenLegacyFilePackage + "\"\n")
+		if err := os.WriteFile(filepath.Join(root, "unsafe.go"), source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, violations, err := inspectSourceImports(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(violations) != 1 || !strings.Contains(violations[0], "removed unsafe path helper") {
+			t.Fatalf("legacy import violations = %v", violations)
+		}
+	})
+
+	t.Run("legacy package directory", func(t *testing.T) {
+		root := t.TempDir()
+		directory := filepath.Join(root, filepath.FromSlash(forbiddenLegacyFileSourcePath))
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "file.go"), []byte("package file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, violations, err := inspectSourceImports(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(violations) != 1 || !strings.Contains(violations[0], forbiddenLegacyFileSourcePath) {
+			t.Fatalf("legacy package violations = %v", violations)
+		}
+	})
+}
+
 func TestSourceImportBoundaryFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	if _, _, err := inspectSourceImports(root); err == nil {
