@@ -7,7 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	appmodel "github.com/EdmundFu-233/ReCasaOS-UserService/model"
 	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 )
 
@@ -155,6 +157,95 @@ func TestGetBootstrapDbDoesNotMigrateAnExistingEmptyFile(t *testing.T) {
 	if len(contents) != 0 {
 		t.Fatalf("existing empty bootstrap database was modified to %d bytes", len(contents))
 	}
+}
+
+func TestGetDbMigratesUpstreamLegacySchema(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "legacy-user-data")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(directory, databaseFilename)
+	if err := os.WriteFile(databasePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := GetExistingDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.AutoMigrate(&upstreamLegacyUserDBModel{}, &appmodel.EventModel{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Exec(`
+		INSERT INTO o_users(id, username, password, role)
+		VALUES(7, 'legacy-admin', 'legacy-verifier', 'admin');
+		INSERT INTO events(uuid, source_id, name, properties, timestamp)
+		VALUES('00000000-0000-4000-8000-000000000001', 'legacy-source', 'legacy-event', '"{}"', 1787184000000);
+	`).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacySQL, err := legacy.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacySQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := GetDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migratedSQL, err := migrated.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migratedSQL.Close() })
+	if !migrated.Migrator().HasTable(&model2.BootstrapStateDBModel{}) {
+		t.Fatal("daemon migration did not create bootstrap state schema")
+	}
+	var uniqueIndexColumns int
+	if err := migrated.Raw(`SELECT COUNT(*) FROM pragma_index_info('idx_o_users_username')
+		WHERE seqno = 0 AND name = 'username'`).Scan(&uniqueIndexColumns).Error; err != nil {
+		t.Fatal(err)
+	}
+	if uniqueIndexColumns != 1 {
+		t.Fatal("daemon migration did not create the username uniqueness boundary")
+	}
+	var uniqueIndexes int
+	if err := migrated.Raw(`SELECT COUNT(*) FROM pragma_index_list('o_users')
+		WHERE name = 'idx_o_users_username' AND "unique" = 1 AND partial = 0`).Scan(&uniqueIndexes).Error; err != nil {
+		t.Fatal(err)
+	}
+	if uniqueIndexes != 1 {
+		t.Fatal("daemon migration did not create an exact unique username index")
+	}
+	var event appmodel.EventModel
+	if err := migrated.First(&event, "uuid = ?", "00000000-0000-4000-8000-000000000001").Error; err != nil {
+		t.Fatal(err)
+	}
+	if event.SourceID != "legacy-source" || event.Name != "legacy-event" || event.Properties != "{}" || event.Timestamp != 1787184000000 {
+		t.Fatal("daemon migration did not preserve the legacy event record")
+	}
+}
+
+// upstreamLegacyUserDBModel is the exact v0.4.17-alpha1 UserDBModel shape. It
+// intentionally lacks the ReCasaOS username uniqueIndex tag so this test proves
+// the daemon can migrate an authentic upstream-created schema.
+type upstreamLegacyUserDBModel struct {
+	Id          int `gorm:"column:id;primary_key"`
+	Username    string
+	Password    string
+	Role        string
+	Email       string
+	Nickname    string
+	Avatar      string
+	Description string
+	CreatedAt   time.Time `gorm:"<-:create;autoCreateTime"`
+	UpdatedAt   time.Time `gorm:"<-:create;<-:update;autoUpdateTime"`
+}
+
+func (upstreamLegacyUserDBModel) TableName() string {
+	return "o_users"
 }
 
 func TestGetDbRepairsExistingOverbroadModes(t *testing.T) {

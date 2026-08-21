@@ -376,6 +376,26 @@ exact_process_live() {
   [[ "$actual_start" == "$expected_start" ]]
 }
 
+start_daemon_or_fail() {
+  local label=$1
+  [[ "$label" =~ ^[a-z0-9-]+$ ]] || fail "daemon diagnostic label is unsafe"
+  if systemctl start casaos-user-service.service; then
+    return 0
+  fi
+  local status_file="$evidence_dir/${label}-daemon-start-status"
+  systemctl show casaos-user-service.service \
+    --property=ActiveState \
+    --property=SubState \
+    --property=Result \
+    --property=ExecMainCode \
+    --property=ExecMainStatus \
+    --property=MainPID >"$status_file" 2>/dev/null || true
+  chmod 0600 "$status_file" 2>/dev/null || true
+  printf 'UserService daemon start state (%s):\n' "$label" >&2
+  sed -n '1,12p' "$status_file" >&2
+  fail "the $label UserService daemon failed to start"
+}
+
 validated_jwks_material() {
   local path=$1
   python3 - "$path" <<'PYTHON'
@@ -477,7 +497,7 @@ jq -n --rawfile username "$evidence_dir/bootstrap-username" \
   --rawfile password "$evidence_dir/bootstrap-password" \
   '{username: $username, password: $password}' >"$evidence_dir/bootstrap-login-request.json"
 chmod 0600 "$evidence_dir/bootstrap-login-request.json"
-systemctl start casaos-user-service.service
+start_daemon_or_fail bootstrap
 bootstrap_daemon_deadline=$((SECONDS + 45))
 bootstrap_ready=0
 while ((SECONDS < bootstrap_daemon_deadline)); do
@@ -578,26 +598,28 @@ mv -- "$seal_path" /var/lib/casaos/e2e-bootstrap-evidence/seal
 install -d -o root -g root -m 0700 "$database_dir"
 sqlite3 "$database_path" <<'SQL'
 PRAGMA journal_mode=DELETE;
-CREATE TABLE o_users (
-  id integer PRIMARY KEY AUTOINCREMENT,
-  username text,
-  password text,
-  role text,
-  email text,
-  nickname text,
-  avatar text,
-  description text,
-  created_at datetime,
-  updated_at datetime
+CREATE TABLE `o_users` (
+  `id` integer,
+  `username` text,
+  `password` text,
+  `role` text,
+  `email` text,
+  `nickname` text,
+  `avatar` text,
+  `description` text,
+  `created_at` datetime,
+  `updated_at` datetime,
+  PRIMARY KEY (`id`)
 );
-CREATE TABLE events (
-  uuid text PRIMARY KEY,
-  source_id text,
-  name text,
-  properties text,
-  timestamp integer
+CREATE TABLE `events` (
+  `uuid` text,
+  `source_id` text,
+  `name` text,
+  `properties` text,
+  `timestamp` integer,
+  PRIMARY KEY (`uuid`)
 );
-CREATE INDEX idx_events_source_id ON events(source_id);
+CREATE INDEX `idx_events_source_id` ON `events`(`source_id`);
 INSERT INTO o_users(id, username, password, role, email, nickname, avatar, description, created_at, updated_at)
 VALUES(7, 'legacy-admin-e2e', '12121b2b7fdedd5ec5777926650d7119', 'admin',
   'legacy-admin@example.invalid', 'Legacy Admin', 'avatar-marker', 'profile-marker',
@@ -805,7 +827,7 @@ write_private "$evidence_dir/first-password" "$first_password"
 write_private "$evidence_dir/second-password" "$second_password"
 write_private "$evidence_dir/lock-password" "$lock_password"
 
-systemctl start casaos-user-service.service
+start_daemon_or_fail legacy
 wait_for_daemon || fail "the UserService daemon did not become ready"
 assert_unauthenticated_private_routes_rejected initial
 [[ "$(sqlite3 -batch -noheader "$database_path" \
@@ -891,7 +913,7 @@ verifier_after_reset=$(sqlite3 -batch -noheader "$database_path" "SELECT passwor
 [[ "$(<"$seal_path")" == "$seal_before_lock" ]] || fail "second password reset changed the seal"
 
 rm -f -- "$service_address_file"
-systemctl start casaos-user-service.service
+start_daemon_or_fail rotated
 wait_for_daemon || fail "the UserService daemon did not restart after password reset"
 assert_unauthenticated_private_routes_rejected restarted
 new_pid=$(systemctl show casaos-user-service.service --property=MainPID --value)
