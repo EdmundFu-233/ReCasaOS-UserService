@@ -146,6 +146,9 @@ func (seal *FileSeal) Create(installationID string) error {
 }
 
 func ensureSealDirectory(path string, ownerUID uint32) error {
+	if err := rejectSymlinkAncestors(path); err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -153,6 +156,9 @@ func ensureSealDirectory(path string, ownerUID uint32) error {
 		}
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return fmt.Errorf("create bootstrap seal directory: %w", err)
+		}
+		if err := rejectSymlinkAncestors(path); err != nil {
+			return err
 		}
 		info, err = os.Lstat(path)
 		if err != nil {
@@ -172,6 +178,9 @@ func ensureSealDirectory(path string, ownerUID uint32) error {
 }
 
 func validateExistingSealDirectory(path string, ownerUID uint32) error {
+	if err := rejectSymlinkAncestors(path); err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -184,6 +193,45 @@ func validateExistingSealDirectory(path string, ownerUID uint32) error {
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		return errors.New("bootstrap seal directory must not be writable by group or other users")
+	}
+	return nil
+}
+
+func rejectSymlinkAncestors(path string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve bootstrap seal directory: %w", err)
+	}
+	volume := filepath.VolumeName(absolute)
+	remainder := strings.TrimPrefix(absolute, volume)
+	current := volume + string(os.PathSeparator)
+	for _, component := range strings.Split(strings.TrimPrefix(remainder, string(os.PathSeparator)), string(os.PathSeparator)) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect bootstrap seal ancestor: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			uid, ok := fileOwnerUID(info)
+			if !ok || uid != 0 {
+				return errors.New("bootstrap seal path must not contain untrusted symlink ancestors")
+			}
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return fmt.Errorf("resolve trusted bootstrap seal ancestor: %w", err)
+			}
+			current = resolved
+			continue
+		}
+		if !info.IsDir() {
+			return errors.New("bootstrap seal ancestor must be a directory")
+		}
 	}
 	return nil
 }

@@ -61,8 +61,8 @@ type userService struct {
 	privateKey *ecdsa.PrivateKey // keep this private - NEVER expose it!!!
 	publicKey  *ecdsa.PublicKey
 
-	db   *gorm.DB
-	seal userbootstrap.Seal
+	db                  *gorm.DB
+	initializationState userbootstrap.State
 }
 
 func (u *userService) DeleteAllUser() error {
@@ -215,11 +215,10 @@ func (u *userService) ChangeUserPassword(id string, oldPassword, newPassword []b
 }
 
 func (u *userService) GetInitializationState(ctx context.Context) (userbootstrap.State, error) {
-	db, err := u.db.DB()
-	if err != nil {
-		return userbootstrap.State{}, fmt.Errorf("access user database pool: %w", err)
+	if err := ctx.Err(); err != nil {
+		return userbootstrap.State{}, err
 	}
-	return userbootstrap.ReconcileState(ctx, db, u.seal)
+	return u.initializationState, nil
 }
 
 func (u *userService) GetUserAllInfoById(id string) (m model.UserDBModel) {
@@ -255,7 +254,7 @@ func (u *userService) GetKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
 }
 
 // 获取用户Service
-func NewUserService(db *gorm.DB, seal userbootstrap.Seal) UserService {
+func NewUserService(db *gorm.DB, initializationState userbootstrap.State) UserService {
 	// DO NOT store private key anywhere - keep it in memory ONLY!!!
 	privateKey, publicKey, err := jwt.GenerateKeyPair()
 	if err != nil {
@@ -264,10 +263,10 @@ func NewUserService(db *gorm.DB, seal userbootstrap.Seal) UserService {
 	}
 
 	return &userService{
-		privateKey: privateKey,
-		publicKey:  publicKey,
-		db:         db,
-		seal:       seal,
+		privateKey:          privateKey,
+		publicKey:           publicKey,
+		db:                  db,
+		initializationState: initializationState,
 	}
 }
 

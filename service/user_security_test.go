@@ -65,7 +65,7 @@ func TestBootstrapAdminValidatesUsernameAndPasswordBeforeWriting(t *testing.T) {
 }
 
 func TestLegacyMD5LoginCASMigratesToArgon2id(t *testing.T) {
-	db, seal := openSecurityTestDatabase(t)
+	db, _ := openSecurityTestDatabase(t)
 	plaintext := []byte("legacy-password")
 	legacyDigest := md5.Sum(plaintext) // #nosec G401 -- legacy fixture.
 	legacyHash := hex.EncodeToString(legacyDigest[:])
@@ -73,7 +73,7 @@ func TestLegacyMD5LoginCASMigratesToArgon2id(t *testing.T) {
 	if err := db.Create(&legacy).Error; err != nil {
 		t.Fatal(err)
 	}
-	userService := NewUserService(db, seal)
+	userService := NewUserService(db, userbootstrap.State{Status: userbootstrap.StatusInitialized})
 
 	const concurrentLogins = 4
 	start := make(chan struct{})
@@ -116,13 +116,36 @@ func TestLegacyMD5LoginCASMigratesToArgon2id(t *testing.T) {
 }
 
 func TestAuthenticationRejectsOversizeInput(t *testing.T) {
-	db, seal := openSecurityTestDatabase(t)
-	userService := NewUserService(db, seal)
+	db, _ := openSecurityTestDatabase(t)
+	userService := NewUserService(db, userbootstrap.State{Status: userbootstrap.StatusInitialized})
 	if _, err := userService.AuthenticateUser("missing", bytes.Repeat([]byte{'x'}, 1025)); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("oversize password error=%v", err)
 	}
 	if _, err := userService.AuthenticateUser(strings.Repeat("u", 257), []byte("password")); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("oversize username error=%v", err)
+	}
+}
+
+func TestInitializationStatusUsesStartupSnapshotWithoutDatabaseLock(t *testing.T) {
+	db, _ := openSecurityTestDatabase(t)
+	want := userbootstrap.State{
+		InstallationID: "123e4567-e89b-42d3-a456-426614174000",
+		Status:         userbootstrap.StatusInitialized,
+	}
+	userService := NewUserService(db, want)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := userService.GetInitializationState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("initialization state = %+v, want %+v", got, want)
 	}
 }
 
@@ -132,7 +155,7 @@ func TestPasswordChangeAlwaysStoresArgon2idAndUsesCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	userService := NewUserService(db, seal)
+	userService := NewUserService(db, userbootstrap.State{Status: userbootstrap.StatusInitialized})
 	user := userService.GetUserAllInfoByName("admin")
 	userID := strconv.Itoa(user.Id)
 	if err := userService.ChangeUserPassword(userID, []byte("wrong-password"), []byte("replacement-strong-password")); !errors.Is(err, ErrInvalidCredentials) {
@@ -162,7 +185,7 @@ func TestLastAdministratorAndBulkDeletionAreRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	userService := NewUserService(db, seal)
+	userService := NewUserService(db, userbootstrap.State{Status: userbootstrap.StatusInitialized})
 	if err := userService.DeleteUserById(strconv.FormatInt(firstID, 10)); !errors.Is(err, ErrLastAdmin) {
 		t.Fatalf("last admin deletion error=%v", err)
 	}
@@ -192,7 +215,7 @@ func TestUserUpdateCannotDemoteAdministrator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	userService := NewUserService(db, seal)
+	userService := NewUserService(db, userbootstrap.State{Status: userbootstrap.StatusInitialized})
 	userService.UpdateUser(model.UserDBModel{Id: int(userID), Username: "admin", Role: "user", Nickname: "changed"})
 	var stored model.UserDBModel
 	if err := db.First(&stored, userID).Error; err != nil {

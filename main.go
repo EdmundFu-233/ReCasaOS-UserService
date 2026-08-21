@@ -120,10 +120,11 @@ func runServer(args []string, stdout, stderr io.Writer, effectiveUID int) error 
 	if err != nil {
 		return fmt.Errorf("access user database pool: %w", err)
 	}
-	if _, err := userbootstrap.ReconcileState(context.Background(), sqlDB, seal); err != nil {
+	initializationState, err := userbootstrap.ReconcileState(context.Background(), sqlDB, seal)
+	if err != nil {
 		return err
 	}
-	service.MyService = service.NewService(sqliteDB, config.CommonInfo.RuntimePath, seal)
+	service.MyService = service.NewService(sqliteDB, config.CommonInfo.RuntimePath, initializationState)
 	if service.MyService == nil || service.MyService.User() == nil {
 		return errors.New("initialize user service")
 	}
@@ -393,11 +394,11 @@ func ownerUIDFromFileInfo(info os.FileInfo) (uint32, bool) {
 }
 
 func requireSealOutsideDatabase(databaseDirectory, sealPath string) error {
-	databaseAbsolute, err := filepath.Abs(databaseDirectory)
+	databaseAbsolute, err := resolveThroughExistingAncestor(databaseDirectory)
 	if err != nil {
 		return fmt.Errorf("resolve database directory: %w", err)
 	}
-	sealAbsolute, err := filepath.Abs(sealPath)
+	sealAbsolute, err := resolveThroughExistingAncestor(sealPath)
 	if err != nil {
 		return fmt.Errorf("resolve bootstrap seal: %w", err)
 	}
@@ -409,6 +410,38 @@ func requireSealOutsideDatabase(databaseDirectory, sealPath string) error {
 		return errors.New("bootstrap seal must be stored outside the database directory")
 	}
 	return nil
+}
+
+// resolveThroughExistingAncestor resolves every existing symlink component,
+// then appends only the still-missing suffix. This makes separation checks
+// reflect the physical ancestor tree rather than attacker-controlled spelling.
+func resolveThroughExistingAncestor(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	probe := filepath.Clean(absolute)
+	var missing []string
+	for {
+		if _, err := os.Lstat(probe); err == nil {
+			resolved, err := filepath.EvalSymlinks(probe)
+			if err != nil {
+				return "", err
+			}
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", errors.New("no existing path ancestor")
+		}
+		missing = append(missing, filepath.Base(probe))
+		probe = parent
+	}
 }
 
 func writeAddressFile(runtimePath string, filename string, address string) (string, error) {

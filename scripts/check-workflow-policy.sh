@@ -5,6 +5,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 workflow_dir=${1:-"$repo_root/.github/workflows"}
+structure_checker="$script_dir/check-workflow-structure.rb"
 
 fail() {
   echo "workflow policy: $*" >&2
@@ -12,13 +13,17 @@ fail() {
 }
 
 [ -d "$workflow_dir" ] || fail "workflow directory does not exist: $workflow_dir"
+command -v ruby >/dev/null 2>&1 || fail "ruby is unavailable"
+[ -f "$structure_checker" ] && [ ! -L "$structure_checker" ] || fail "workflow structure checker is missing or symbolic"
 
 workflow_count=0
 for workflow in "$workflow_dir"/*.yml "$workflow_dir"/*.yaml; do
-  [ -f "$workflow" ] || continue
-  workflow_count=$((workflow_count + 1))
+	[ -f "$workflow" ] || continue
+	workflow_count=$((workflow_count + 1))
 
-  if grep -Eiq '\$\{\{[[:space:]]*secrets\.' "$workflow"; then
+	ruby "$structure_checker" "$workflow" || fail "$workflow failed structured workflow validation"
+
+	if grep -Eiq '\$\{\{[^}]*secrets([^[:alnum:]_]|$)' "$workflow"; then
     fail "$workflow references repository or environment secrets"
   fi
   if grep -Eiq 'pull_request_target|workflow_run|workflow_call' "$workflow"; then

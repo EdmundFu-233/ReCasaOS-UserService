@@ -55,6 +55,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - run: echo "${{ secrets.TOKEN }}"'
+expect_reject "whole secrets context" 'name: bad
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "${{ toJSON(secrets) }}"'
+expect_reject "quoted uses key" 'name: bad
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - "uses": attacker/action@main'
+expect_reject "spaced uses key" 'name: bad
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses : attacker/action@main'
 expect_reject "sshpass" 'name: bad
 on: push
 jobs:

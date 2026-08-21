@@ -142,6 +142,21 @@ func TestBootstrapSealMustBeOutsideDatabaseDirectory(t *testing.T) {
 	}
 }
 
+func TestBootstrapSealRejectsAncestorSymlinkIntoDatabase(t *testing.T) {
+	root := t.TempDir()
+	database := filepath.Join(root, "database")
+	if err := os.Mkdir(database, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "apparently-external")
+	if err := os.Symlink(database, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireSealOutsideDatabase(database, filepath.Join(alias, "seal")); err == nil {
+		t.Fatal("seal physically inside database through ancestor symlink was accepted")
+	}
+}
+
 func TestSystemdBootstrapUnitIsOneShotAndConflictsWithDaemon(t *testing.T) {
 	unit, err := os.ReadFile("build/sysroot/usr/lib/systemd/system/recasaos-user-bootstrap.service")
 	if err != nil {
@@ -151,12 +166,21 @@ func TestSystemdBootstrapUnitIsOneShotAndConflictsWithDaemon(t *testing.T) {
 	for _, required := range []string{
 		"Conflicts=casaos-user-service.service",
 		"Type=oneshot",
-		"LoadCredential=recasaos.admin.username",
-		"LoadCredential=recasaos.admin.password",
+		"LoadCredential=recasaos.admin.username:/run/recasaos-user-bootstrap/username",
+		"LoadCredential=recasaos.admin.password:/run/recasaos-user-bootstrap/password",
 		"ExecStart=/usr/bin/casaos-user-service bootstrap-admin",
+		"ExecStopPost=-/usr/bin/rm -f -- /run/recasaos-user-bootstrap/username /run/recasaos-user-bootstrap/password",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("bootstrap unit is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"LoadCredential=recasaos.admin.username\n",
+		"LoadCredential=recasaos.admin.password\n",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("bootstrap unit contains unsupported bare credential directive %q", forbidden)
 		}
 	}
 }

@@ -16,13 +16,24 @@ The command:
 - commits the administrator and initialized marker atomically.
 
 The packaged `recasaos-user-bootstrap.service` is a disabled oneshot unit that
-conflicts with `casaos-user-service.service`. Before starting it, a local
-administrator must provide both `LoadCredential` sources in a root-only
-drop-in or through an equivalent transient systemd unit. Credential source
-files must be regular root-owned files with mode `0600`, preferably on a
-temporary filesystem. Remove those source files immediately after the oneshot
-finishes. Do not put either credential in a shell command line, unit
-`Environment=`, journal message, or issue report.
+conflicts with `casaos-user-service.service`. Its explicit `LoadCredential`
+source paths are compatible with the supported systemd 247 and newer targets:
+
+- `/run/recasaos-user-bootstrap/username`
+- `/run/recasaos-user-bootstrap/password`
+
+Before starting it, a local administrator must create that directory as
+root-owned mode `0700` and both source files as root-owned mode `0600`. Capture
+the password from a secure local TTY without placing it in command arguments,
+environment variables, shell history, journal messages, or issue reports.
+The unit removes both source files after the oneshot exits; the administrator
+must verify their absence and remove them manually if credential loading itself
+failed before the service process was started.
+
+Use this explicit lifecycle: stop `casaos-user-service.service`, start and wait
+for `recasaos-user-bootstrap.service`, verify its successful result and the
+absence of both source files, then start `casaos-user-service.service` again.
+Do not use the network registration endpoint as a recovery fallback.
 
 The database marker is paired with
 `/etc/casaos/recasaos-user-bootstrap.seal`. The seal is deliberately outside

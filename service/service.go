@@ -17,7 +17,7 @@ type Repository interface {
 	Event() EventService
 }
 
-func NewService(db *gorm.DB, RuntimePath string, seal userbootstrap.Seal) Repository {
+func NewService(db *gorm.DB, RuntimePath string, initializationState userbootstrap.State) Repository {
 
 	gatewayManagement, err := external.NewManagementService(RuntimePath)
 	if err != nil {
@@ -26,7 +26,7 @@ func NewService(db *gorm.DB, RuntimePath string, seal userbootstrap.Seal) Reposi
 
 	return &store{
 		gateway: gatewayManagement,
-		user:    NewUserService(db, seal),
+		user:    NewUserService(db, initializationState),
 		event:   NewEventService(db),
 	}
 }

@@ -15,8 +15,24 @@ import (
 	"strings"
 )
 
-type message struct {
-	Finding *finding `json:"finding"`
+type scanConfig struct {
+	ProtocolVersion string `json:"protocol_version"`
+	ScannerName     string `json:"scanner_name"`
+	ScannerVersion  string `json:"scanner_version"`
+	GoVersion       string `json:"go_version"`
+	ScanLevel       string `json:"scan_level"`
+	ScanMode        string `json:"scan_mode"`
+}
+
+type scanSBOM struct {
+	GoVersion string `json:"go_version"`
+	Modules   []struct {
+		Path string `json:"path"`
+	} `json:"modules"`
+}
+
+type progress struct {
+	Message string `json:"message"`
 }
 
 type finding struct {
@@ -93,21 +109,82 @@ func readAllowlist(path string) (map[string]struct{}, error) {
 func readReachableFindings(reader io.Reader) (map[string]struct{}, error) {
 	reachable := make(map[string]struct{})
 	decoder := json.NewDecoder(reader)
+	configCount := 0
+	sbomCount := 0
+	checkingProgress := false
 	for {
-		var event message
-		err := decoder.Decode(&event)
+		var raw map[string]json.RawMessage
+		err := decoder.Decode(&raw)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return nil, err
 		}
-		if event.Finding == nil || len(event.Finding.Trace) == 0 {
-			continue
+		if len(raw) != 1 {
+			return nil, errors.New("govulncheck message must contain exactly one top-level field")
 		}
-		if event.Finding.Trace[0].Function != "" {
-			reachable[event.Finding.OSV] = struct{}{}
+		for kind, payload := range raw {
+			switch kind {
+			case "config":
+				configCount++
+				var config scanConfig
+				if err := json.Unmarshal(payload, &config); err != nil {
+					return nil, fmt.Errorf("decode govulncheck config: %w", err)
+				}
+				if config.ProtocolVersion != "v1.0.0" || config.ScannerName != "govulncheck" ||
+					config.ScannerVersion == "" || config.GoVersion == "" ||
+					config.ScanLevel != "symbol" || config.ScanMode != "source" {
+					return nil, errors.New("govulncheck config is not a source symbol scan")
+				}
+			case "SBOM":
+				sbomCount++
+				var sbom scanSBOM
+				if err := json.Unmarshal(payload, &sbom); err != nil {
+					return nil, fmt.Errorf("decode govulncheck SBOM: %w", err)
+				}
+				if sbom.GoVersion == "" || len(sbom.Modules) == 0 {
+					return nil, errors.New("govulncheck SBOM is empty")
+				}
+				rootFound := false
+				for _, module := range sbom.Modules {
+					if module.Path == "github.com/EdmundFu-233/ReCasaOS-UserService" {
+						rootFound = true
+					}
+				}
+				if !rootFound {
+					return nil, errors.New("govulncheck SBOM does not contain the root module")
+				}
+			case "progress":
+				var progress progress
+				if err := json.Unmarshal(payload, &progress); err != nil {
+					return nil, fmt.Errorf("decode govulncheck progress: %w", err)
+				}
+				if progress.Message == "Checking the code against the vulnerabilities..." {
+					checkingProgress = true
+				}
+			case "osv":
+				if len(payload) == 0 || string(payload) == "null" {
+					return nil, errors.New("govulncheck OSV message is empty")
+				}
+			case "finding":
+				var finding finding
+				if err := json.Unmarshal(payload, &finding); err != nil {
+					return nil, fmt.Errorf("decode govulncheck finding: %w", err)
+				}
+				if finding.OSV == "" {
+					return nil, errors.New("govulncheck finding is missing an OSV identifier")
+				}
+				if len(finding.Trace) != 0 && finding.Trace[0].Function != "" {
+					reachable[finding.OSV] = struct{}{}
+				}
+			default:
+				return nil, fmt.Errorf("unknown govulncheck message type %q", kind)
+			}
 		}
+	}
+	if configCount != 1 || sbomCount != 1 || !checkingProgress {
+		return nil, errors.New("govulncheck stream is incomplete or duplicated")
 	}
 	return reachable, nil
 }
