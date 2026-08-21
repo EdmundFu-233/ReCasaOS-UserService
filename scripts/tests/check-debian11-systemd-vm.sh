@@ -53,10 +53,16 @@ if isinstance(pull_request, dict):
     base_sha = base.get("sha")
     if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) for value in (head_sha, base_sha)):
         raise SystemExit("pull request source identity is malformed")
-    parents = subprocess.check_output(
-        ["git", "show", "--no-patch", "--format=%P", actual],
+    commit_object = subprocess.check_output(
+        ["git", "cat-file", "commit", actual],
         text=True,
-    ).strip().split()
+    )
+    parents = []
+    for line in commit_object.splitlines():
+        if not line:
+            break
+        if line.startswith("parent "):
+            parents.append(line.removeprefix("parent "))
     if parents != [base_sha, head_sha]:
         raise SystemExit("checked-out pull request merge does not bind the event base and head")
 else:

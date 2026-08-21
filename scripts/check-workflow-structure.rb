@@ -8,7 +8,7 @@ VM_INSTALL_RUN = "sudo apt-get update\nsudo apt-get install --yes --no-install-r
 VM_LIFECYCLE_RUN = "bash scripts/tests/check-debian11-systemd-vm.sh".freeze
 VM_SCRIPT_VERIFY_RUN = <<~'BASH'.strip.freeze
   printf '%s  %s\n' \
-    'bffb4639af8268725b636a94c0bf096835addfd2c70da5eddf87c015867adb68' 'scripts/tests/check-debian11-systemd-vm.sh' \
+    '8bb5ea20ca4f01bb5f6af7f782058093223c0bd154cef238181aba626f45cc01' 'scripts/tests/check-debian11-systemd-vm.sh' \
     'e08a2181f7709e2b59917c442b4b1bb8a79bf20612436fa71c3b2ca2784523a1' 'scripts/tests/test-systemd-lifecycle.sh' |
     sha256sum --check --strict
   test -z "$(git status --porcelain --untracked-files=all)"
@@ -65,7 +65,7 @@ EXPECTED_CODEQL_STEPS = [
 ].freeze
 
 EXPECTED_VM_SCRIPT_SHA256 = {
-  "scripts/tests/check-debian11-systemd-vm.sh" => "bffb4639af8268725b636a94c0bf096835addfd2c70da5eddf87c015867adb68",
+  "scripts/tests/check-debian11-systemd-vm.sh" => "8bb5ea20ca4f01bb5f6af7f782058093223c0bd154cef238181aba626f45cc01",
   "scripts/tests/test-systemd-lifecycle.sh" => "e08a2181f7709e2b59917c442b4b1bb8a79bf20612436fa71c3b2ca2784523a1"
 }.freeze
 
