@@ -36,6 +36,159 @@ func TestBootstrapAdminCreatesOnlyArgon2idAdministrator(t *testing.T) {
 	}
 }
 
+func TestBootstrapReplayLeavesExistingDatabaseBytesUnchanged(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "db")
+	seal := userbootstrap.NewFileSeal(filepath.Join(t.TempDir(), "seal", "bootstrap.seal"), uint32(os.Geteuid()))
+	db, err := sqlite.GetBootstrapDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BootstrapAdmin(context.Background(), db, seal, "local-admin", []byte("strong-bootstrap-password"), nil); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(directory, "user.db")
+	before, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := sqlite.GetBootstrapDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BootstrapAdmin(context.Background(), reopened, seal, "second", []byte("another-strong-password"), nil); !errors.Is(err, userbootstrap.ErrAlreadyInitialized) {
+		t.Fatalf("replayed BootstrapAdmin() = %v", err)
+	}
+	reopenedSQL, err := reopened.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopenedSQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("replayed bootstrap changed existing database bytes")
+	}
+}
+
+func TestBootstrapAdminDoesNotMigrateOrMutateExistingLegacyDatabase(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "legacy-db")
+	legacy, err := sqlite.GetDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Create(&model.UserDBModel{Username: "legacy-admin", Password: "legacy-verifier", Role: "admin"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Migrator().DropTable(&model.BootstrapStateDBModel{}); err != nil {
+		t.Fatal(err)
+	}
+	legacySQL, err := legacy.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacySQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(directory, "user.db")
+	before, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sealPath := filepath.Join(t.TempDir(), "seal", "bootstrap.seal")
+	seal := userbootstrap.NewFileSeal(sealPath, uint32(os.Geteuid()))
+	reopened, err := sqlite.GetBootstrapDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackCalled := false
+	if _, err := BootstrapAdmin(context.Background(), reopened, seal, "new-admin", []byte("strong-bootstrap-password"), func(int64) error {
+		callbackCalled = true
+		return nil
+	}); err == nil {
+		t.Fatal("bootstrap unexpectedly migrated and accepted an existing legacy database")
+	}
+	if callbackCalled {
+		t.Fatal("rejected legacy bootstrap created administrator resources")
+	}
+	if reopened.Migrator().HasTable(&model.BootstrapStateDBModel{}) {
+		t.Fatal("rejected legacy bootstrap created bootstrap state schema")
+	}
+	reopenedSQL, err := reopened.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopenedSQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("rejected legacy bootstrap changed existing database bytes")
+	}
+	if _, err := os.Lstat(sealPath); !os.IsNotExist(err) {
+		t.Fatalf("rejected legacy bootstrap changed the seal path: %v", err)
+	}
+}
+
+func TestBootstrapAdminDoesNotPromoteAnExistingEmptyDatabaseFile(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "empty-db")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(directory, "user.db")
+	if err := os.WriteFile(databasePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sealPath := filepath.Join(t.TempDir(), "seal", "bootstrap.seal")
+	seal := userbootstrap.NewFileSeal(sealPath, uint32(os.Geteuid()))
+	db, err := sqlite.GetBootstrapDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackCalled := false
+	if _, err := BootstrapAdmin(context.Background(), db, seal, "new-admin", []byte("strong-bootstrap-password"), func(int64) error {
+		callbackCalled = true
+		return nil
+	}); err == nil {
+		t.Fatal("bootstrap unexpectedly accepted an existing empty database")
+	}
+	if callbackCalled {
+		t.Fatal("rejected empty-database bootstrap created administrator resources")
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) != 0 {
+		t.Fatalf("rejected empty-database bootstrap wrote %d bytes", len(contents))
+	}
+	if _, err := os.Lstat(sealPath); !os.IsNotExist(err) {
+		t.Fatalf("rejected empty-database bootstrap changed the seal path: %v", err)
+	}
+}
+
 func TestBootstrapAdminValidatesUsernameAndPasswordBeforeWriting(t *testing.T) {
 	db, seal := openSecurityTestDatabase(t)
 	tests := []struct {

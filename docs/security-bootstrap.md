@@ -44,6 +44,15 @@ marker with no seal may republish only the same installation ID; this narrowly
 recovers the deliberate database-commit-before-seal crash window and never
 creates another administrator.
 
+The bootstrap command atomically creates the database file and migrates only a
+file that the same invocation created with exclusive-create semantics. An
+existing zero-length, partial, or legacy-shaped database is never
+automatically migrated into a first-administrator database; it fails closed
+without changing the file or publishing a seal. If the machine fails after the
+exclusive file creation but before schema migration completes, the residual
+file requires an explicitly reviewed local recovery or restore. Do not delete
+or auto-promote it as a retry shortcut.
+
 On success the command prints only:
 
 ```text

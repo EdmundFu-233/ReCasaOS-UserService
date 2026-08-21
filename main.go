@@ -279,7 +279,7 @@ func runBootstrapAdmin(args []string, stdout, stderr io.Writer, effectiveUID int
 	if err := requireSealOutsideDatabase(*dbFlag, *sealFlag); err != nil {
 		return err
 	}
-	db, err := sqlite.GetDb(*dbFlag)
+	db, err := sqlite.GetBootstrapDb(*dbFlag)
 	if err != nil {
 		return err
 	}

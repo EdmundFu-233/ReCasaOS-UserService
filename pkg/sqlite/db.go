@@ -42,6 +42,34 @@ func GetExistingDb(dbPath string) (*gorm.DB, error) {
 	return openDb(dbPath, false, false)
 }
 
+// GetBootstrapDb atomically claims a new database with O_CREATE|O_EXCL and
+// migrates only the file created by that call. Once a bootstrap attempt has
+// created the database, every replay opens it in mode=rw without AutoMigrate so
+// rejecting an already-initialized installation cannot rewrite SQLite schema
+// bytes before the state check.
+// An existing empty or legacy-shaped file is never silently promoted by this
+// local first-administrator command.
+func GetBootstrapDb(dbPath string) (*gorm.DB, error) {
+	if strings.TrimSpace(dbPath) == "" {
+		return nil, errors.New("database directory is empty")
+	}
+	if err := secureDirectory(dbPath, true); err != nil {
+		return nil, err
+	}
+	databasePath := filepath.Join(dbPath, databaseFilename)
+	file, err := os.OpenFile(databasePath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, fmt.Errorf("close new bootstrap database: %w", closeErr)
+		}
+		return openDb(dbPath, false, true)
+	}
+	if !os.IsExist(err) {
+		return nil, fmt.Errorf("create bootstrap database exclusively: %w", err)
+	}
+	return openDb(dbPath, false, false)
+}
+
 func openDb(dbPath string, create, migrate bool) (*gorm.DB, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, errors.New("database directory is empty")

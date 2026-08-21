@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -82,6 +83,77 @@ func TestGetExistingDbDoesNotMigrateAnEmptyExistingFile(t *testing.T) {
 	}
 	if len(contents) != 0 {
 		t.Fatalf("existing empty database was modified to %d bytes", len(contents))
+	}
+}
+
+func TestGetBootstrapDbCreatesSchemaOnlyForANewDatabase(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "bootstrap-data")
+	db, err := GetBootstrapDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !db.Migrator().HasTable(&model2.BootstrapStateDBModel{}) {
+		t.Fatal("new bootstrap database did not receive the required schema")
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	databasePath := filepath.Join(directory, databaseFilename)
+	before, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := GetBootstrapDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenedSQL, err := reopened.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopenedSQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("reopening a bootstrap database changed its bytes")
+	}
+}
+
+func TestGetBootstrapDbDoesNotMigrateAnExistingEmptyFile(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "existing-bootstrap-data")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(directory, databaseFilename)
+	if err := os.WriteFile(databasePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := GetBootstrapDb(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) != 0 {
+		t.Fatalf("existing empty bootstrap database was modified to %d bytes", len(contents))
 	}
 }
 
