@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	model2 "github.com/IceWhaleTech/CasaOS-UserService/service/model"
+	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 )
 
 func TestGetDbCreatesOwnerOnlyDatabaseAndSchema(t *testing.T) {

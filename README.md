@@ -10,8 +10,8 @@
 [![CodeQL](https://github.com/EdmundFu-233/ReCasaOS-UserService/actions/workflows/codeql.yml/badge.svg)](https://github.com/EdmundFu-233/ReCasaOS-UserService/actions/workflows/codeql.yml)
 
 ReCasaOS User Service provides CasaOS-compatible local user-management APIs.
-The Go module path remains `github.com/IceWhaleTech/CasaOS-UserService` for
-source compatibility while the fork is hardened.
+The Go module path is `github.com/EdmundFu-233/ReCasaOS-UserService`; upstream
+provenance and the immutable fork baseline remain documented separately.
 
 ## Secure administrator bootstrap
 

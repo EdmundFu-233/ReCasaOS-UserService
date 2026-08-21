@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"time"
 
-	passwordutil "github.com/IceWhaleTech/CasaOS-UserService/pkg/password"
+	passwordutil "github.com/EdmundFu-233/ReCasaOS-UserService/pkg/password"
 )
 
 const singletonID = 1

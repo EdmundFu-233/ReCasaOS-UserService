@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/IceWhaleTech/CasaOS-UserService/model"
-	model2 "github.com/IceWhaleTech/CasaOS-UserService/service/model"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model"
+	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )

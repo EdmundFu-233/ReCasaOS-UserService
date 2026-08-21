@@ -3,7 +3,7 @@ package route
 import (
 	"net/http"
 
-	v1 "github.com/IceWhaleTech/CasaOS-UserService/route/v1"
+	v1 "github.com/EdmundFu-233/ReCasaOS-UserService/route/v1"
 	"github.com/labstack/echo/v4"
 	echo_middleware "github.com/labstack/echo/v4/middleware"
 )

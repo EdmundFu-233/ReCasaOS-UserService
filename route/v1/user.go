@@ -20,22 +20,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/EdmundFu-233/ReCasaOS-UserService/common"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model/system_model"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/utils/file"
+	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/common_err"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
-	"github.com/IceWhaleTech/CasaOS-UserService/common"
-	"github.com/IceWhaleTech/CasaOS-UserService/model"
-	"github.com/IceWhaleTech/CasaOS-UserService/model/system_model"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/config"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/userbootstrap"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/utils/file"
-	model2 "github.com/IceWhaleTech/CasaOS-UserService/service/model"
 	"github.com/labstack/echo/v4"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
-	"github.com/IceWhaleTech/CasaOS-UserService/service"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 )
 
 // @Summary register user

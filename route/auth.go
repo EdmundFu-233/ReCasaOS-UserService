@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/authsecurity"
-	"github.com/IceWhaleTech/CasaOS-UserService/service"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/authsecurity"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 	"github.com/labstack/echo/v4"
 )
 

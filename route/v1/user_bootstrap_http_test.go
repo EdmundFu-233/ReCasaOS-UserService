@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/userbootstrap"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
 	"github.com/labstack/echo/v4"
 )
 

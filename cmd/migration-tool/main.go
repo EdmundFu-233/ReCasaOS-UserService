@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/EdmundFu-233/ReCasaOS-UserService/common"
 	interfaces "github.com/IceWhaleTech/CasaOS-Common"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/systemctl"
-	"github.com/IceWhaleTech/CasaOS-UserService/common"
 )
 
 const (

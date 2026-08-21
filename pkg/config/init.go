@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
+	"github.com/EdmundFu-233/ReCasaOS-UserService/model"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/constants"
-	"github.com/IceWhaleTech/CasaOS-UserService/model"
 	"gopkg.in/ini.v1"
 )
 

@@ -13,10 +13,10 @@ import (
 	"sync"
 	"testing"
 
-	passwordutil "github.com/IceWhaleTech/CasaOS-UserService/pkg/password"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/sqlite"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/userbootstrap"
-	"github.com/IceWhaleTech/CasaOS-UserService/service/model"
+	passwordutil "github.com/EdmundFu-233/ReCasaOS-UserService/pkg/password"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/sqlite"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"gorm.io/gorm"
 )
 

@@ -1,4 +1,4 @@
-module github.com/IceWhaleTech/CasaOS-UserService
+module github.com/EdmundFu-233/ReCasaOS-UserService
 
 go 1.26.6
 

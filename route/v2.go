@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	codegen "github.com/IceWhaleTech/CasaOS-UserService/codegen/user_service"
-	v2 "github.com/IceWhaleTech/CasaOS-UserService/route/v2"
+	codegen "github.com/EdmundFu-233/ReCasaOS-UserService/codegen/user_service"
+	v2 "github.com/EdmundFu-233/ReCasaOS-UserService/route/v2"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/labstack/echo/v4"

@@ -20,11 +20,11 @@ import (
 	"os"
 	"regexp"
 
+	passwordutil "github.com/EdmundFu-233/ReCasaOS-UserService/pkg/password"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
-	passwordutil "github.com/IceWhaleTech/CasaOS-UserService/pkg/password"
-	"github.com/IceWhaleTech/CasaOS-UserService/pkg/userbootstrap"
-	"github.com/IceWhaleTech/CasaOS-UserService/service/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
