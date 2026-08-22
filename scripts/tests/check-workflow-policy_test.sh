@@ -10,10 +10,13 @@ policy_repo="$fixture_root/repo"
 repo_root=$(cd "$script_dir/../.." && pwd)
 ci_source="$repo_root/.github/workflows/ci.yml"
 codeql_source="$repo_root/.github/workflows/codeql.yml"
+trusted_source="$repo_root/.github/workflows/trusted-attestor.yml"
 
 cleanup() {
   rm -f "$workflow_dir/test.yml" "$workflow_dir/ci.yml" "$workflow_dir/codeql.yml" \
-    "$workflow_dir/ci.yaml" "$workflow_dir/extra.yml" "$workflow_dir/.hidden.yml" \
+    "$workflow_dir/trusted-attestor.yml" \
+    "$workflow_dir/trusted-attestor.yaml" "$workflow_dir/ci.yaml" \
+    "$workflow_dir/extra.yml" "$workflow_dir/.hidden.yml" \
     "$fixture_root/policy-output"
   rm -rf "$policy_repo"
   rmdir "$workflow_dir" "$fixture_root" 2>/dev/null || true
@@ -220,8 +223,8 @@ expect_ci_reject "changed early VM step identity" \
   '      - name: Install isolated Debian VM tools' '      - name: Renamed isolated Debian VM tools' \
   'CI Go 1.26.6 step sequence is not exact'
 expect_ci_reject "removed same-runner VM digest verification" \
-  '8bb5ea20ca4f01bb5f6af7f782058093223c0bd154cef238181aba626f45cc01' \
-  'abb5ea20ca4f01bb5f6af7f782058093223c0bd154cef238181aba626f45cc01' \
+  '186a91e596aba93a23364d260e5b640b04409dae263840f2399c7be41cc4db46' \
+  '286a91e596aba93a23364d260e5b640b04409dae263840f2399c7be41cc4db46' \
   'run command is not allowlisted'
 expect_ci_reject "mutable setup-go identity" \
   'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e' \
@@ -231,9 +234,10 @@ expect_ci_reject "required check display-name impersonator" \
   $'jobs:\n  workflow-policy:' $'jobs:\n  analyze-impostor:\n    name: Analyze Go\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    steps:\n      - name: No-op build\n        shell: bash\n        run: go build ./...\n  workflow-policy:' \
   'CI workflow must contain exactly workflow-policy and go jobs'
 
-rm -f "$workflow_dir/test.yml" "$workflow_dir/ci.yml" "$workflow_dir/codeql.yml" "$workflow_dir/ci.yaml" "$workflow_dir/extra.yml"
+rm -f "$workflow_dir/test.yml" "$workflow_dir/ci.yml" "$workflow_dir/codeql.yml" "$workflow_dir/trusted-attestor.yml" "$workflow_dir/ci.yaml" "$workflow_dir/extra.yml"
 cp "$ci_source" "$workflow_dir/ci.yaml"
 cp "$codeql_source" "$workflow_dir/codeql.yml"
+cp "$trusted_source" "$workflow_dir/trusted-attestor.yml"
 if bash "$checker" "$workflow_dir" >"$fixture_root/policy-output" 2>&1; then
   echo "expected rejection: renamed CI workflow" >&2
   exit 1
@@ -250,7 +254,7 @@ if bash "$checker" "$workflow_dir" >"$fixture_root/policy-output" 2>&1; then
   echo "expected rejection: extra workflow" >&2
   exit 1
 fi
-grep -Fq 'exactly ci.yml and codeql.yml' "$fixture_root/policy-output" || {
+grep -Fq 'exactly ci.yml, codeql.yml, and trusted-attestor.yml' "$fixture_root/policy-output" || {
   echo "unexpected extra-workflow rejection reason" >&2
   exit 1
 }
@@ -261,12 +265,56 @@ if bash "$checker" "$workflow_dir" >"$fixture_root/policy-output" 2>&1; then
   echo "expected rejection: hidden extra workflow" >&2
   exit 1
 fi
-grep -Fq 'exactly ci.yml and codeql.yml' "$fixture_root/policy-output" || {
+grep -Fq 'exactly ci.yml, codeql.yml, and trusted-attestor.yml' "$fixture_root/policy-output" || {
   echo "unexpected hidden-workflow rejection reason" >&2
   exit 1
 }
 
 rm -f "$workflow_dir/.hidden.yml"
+rm -f "$workflow_dir/trusted-attestor.yml"
+if bash "$checker" "$workflow_dir" >"$fixture_root/policy-output" 2>&1; then
+  echo "expected rejection: missing trusted attestor workflow" >&2
+  exit 1
+fi
+grep -Fq 'exactly ci.yml, codeql.yml, and trusted-attestor.yml' "$fixture_root/policy-output" || {
+  echo "unexpected missing-attestor rejection reason" >&2
+  exit 1
+}
+
+ln -s "$trusted_source" "$workflow_dir/trusted-attestor.yml"
+if bash "$checker" "$workflow_dir" >"$fixture_root/policy-output" 2>&1; then
+  echo "expected rejection: symbolic trusted attestor workflow" >&2
+  exit 1
+fi
+grep -Fq 'regular and non-symbolic' "$fixture_root/policy-output" || {
+  echo "unexpected symbolic-attestor rejection reason" >&2
+  exit 1
+}
+rm -f "$workflow_dir/trusted-attestor.yml"
+
+mkfifo "$workflow_dir/trusted-attestor.yml"
+if bash "$checker" "$workflow_dir" >"$fixture_root/policy-output" 2>&1; then
+  echo "expected rejection: FIFO trusted attestor workflow" >&2
+  exit 1
+fi
+grep -Fq 'regular and non-symbolic' "$fixture_root/policy-output" || {
+  echo "unexpected FIFO-attestor rejection reason" >&2
+  exit 1
+}
+rm -f "$workflow_dir/trusted-attestor.yml"
+
+cp "$trusted_source" "$workflow_dir/trusted-attestor.yaml"
+if bash "$checker" "$workflow_dir" >"$fixture_root/policy-output" 2>&1; then
+  echo "expected rejection: renamed trusted attestor workflow" >&2
+  exit 1
+fi
+grep -Fq 'unsupported filename' "$fixture_root/policy-output" || {
+  echo "unexpected renamed-attestor rejection reason" >&2
+  exit 1
+}
+rm -f "$workflow_dir/trusted-attestor.yaml"
+cp "$trusted_source" "$workflow_dir/trusted-attestor.yml"
+
 ruby - "$codeql_source" "$workflow_dir/codeql.yml" <<'RUBY'
 source, destination = ARGV
 text = File.read(source, encoding: "UTF-8")
@@ -362,4 +410,5 @@ grep -Fq 'reviewed VM script digest does not match policy' "$fixture_root/policy
   exit 1
 }
 
+bash "$repo_root/scripts/tests/check-trusted-attestor-policy_test.sh"
 echo "workflow policy negative tests passed"

@@ -23,24 +23,69 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 cd -- "$repo_root"
 [[ "$(git rev-parse --show-toplevel)" == "$repo_root" ]] || fail "the script is not running from the exact repository root"
 actual_sha=$(git rev-parse HEAD) || fail "could not inspect the checkout SHA"
-[[ "$actual_sha" == "$GITHUB_SHA" ]] || fail "checkout SHA does not match GITHUB_SHA"
+actual_tree=$(git show -s --format=%T HEAD) || fail "could not inspect the checkout tree"
+[[ "$actual_sha" =~ ^[0-9a-f]{40}$ && "$actual_tree" =~ ^[0-9a-f]{40}$ ]] ||
+  fail "checkout identity is malformed"
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || fail "the exact checkout is not clean"
 
-/usr/bin/python3 - "$GITHUB_EVENT_PATH" "$actual_sha" <<'PYTHON'
+/usr/bin/python3 - "$GITHUB_EVENT_PATH" "$actual_sha" "$actual_tree" <<'PYTHON'
 import json
+import os
 import re
 import subprocess
 import sys
 
-event_path, actual = sys.argv[1:]
+event_path, actual, actual_tree = sys.argv[1:]
 with open(event_path, encoding="utf-8") as source:
     event = json.load(source)
 repository = event.get("repository") or {}
-if repository.get("full_name") != "EdmundFu-233/ReCasaOS-UserService":
+if (
+    repository.get("id") != 1341287306
+    or repository.get("full_name") != "EdmundFu-233/ReCasaOS-UserService"
+    or (repository.get("owner") or {}).get("login") != "EdmundFu-233"
+):
     raise SystemExit("event repository identity is not trusted")
 event_name = event.get("action")
 pull_request = event.get("pull_request")
-if isinstance(pull_request, dict):
+promotion_names = (
+    "RECASAOS_TRUSTED_PROMOTION_SHA",
+    "RECASAOS_TRUSTED_PROMOTION_TREE",
+    "RECASAOS_TRUSTED_PROMOTION_HOST_SHA256",
+    "RECASAOS_TRUSTED_PROMOTION_GUEST_SHA256",
+)
+promotion_values = {name: os.environ.get(name, "") for name in promotion_names}
+if event_name == "trusted-attestor-promote":
+    if (event.get("sender") or {}).get("login") != "EdmundFu-233":
+        raise SystemExit("trusted promotion sender is not the repository owner")
+    payload = event.get("client_payload") or {}
+    if set(payload) != {
+        "pull_request",
+        "head_sha",
+        "tree_sha",
+        "vm_host_sha256",
+        "vm_guest_sha256",
+    }:
+        raise SystemExit("trusted promotion payload keys are not exact")
+    expected_sha = promotion_values["RECASAOS_TRUSTED_PROMOTION_SHA"]
+    expected_tree = promotion_values["RECASAOS_TRUSTED_PROMOTION_TREE"]
+    expected_host = promotion_values["RECASAOS_TRUSTED_PROMOTION_HOST_SHA256"]
+    expected_guest = promotion_values["RECASAOS_TRUSTED_PROMOTION_GUEST_SHA256"]
+    if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (expected_sha, expected_tree)):
+        raise SystemExit("trusted promotion commit identity is malformed")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (expected_host, expected_guest)):
+        raise SystemExit("trusted promotion harness identity is malformed")
+    if (
+        payload.get("head_sha") != expected_sha
+        or payload.get("tree_sha") != expected_tree
+        or payload.get("vm_host_sha256") != expected_host
+        or payload.get("vm_guest_sha256") != expected_guest
+        or actual != expected_sha
+        or actual_tree != expected_tree
+    ):
+        raise SystemExit("trusted promotion payload does not bind the checkout")
+elif any(promotion_values.values()):
+    raise SystemExit("trusted promotion environment appeared outside its exact event")
+elif isinstance(pull_request, dict):
     head = pull_request.get("head") or {}
     base = pull_request.get("base") or {}
     head_repo = head.get("repo") or {}
@@ -66,6 +111,8 @@ if isinstance(pull_request, dict):
     if parents != [base_sha, head_sha]:
         raise SystemExit("checked-out pull request merge does not bind the event base and head")
 else:
+    if actual != os.environ.get("GITHUB_SHA"):
+        raise SystemExit("checkout SHA does not match GITHUB_SHA")
     if event.get("ref") != "refs/heads/main" or event.get("after") != actual:
         raise SystemExit("push event is not the exact main commit")
 PYTHON

@@ -6,6 +6,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 workflow_dir=${1:-"$repo_root/.github/workflows"}
 structure_checker="$script_dir/check-workflow-structure.rb"
+trusted_checker="$script_dir/check-trusted-attestor-workflow.sh"
 fixture_mode=${RECASAOS_WORKFLOW_POLICY_FIXTURE_MODE:-0}
 
 fail() {
@@ -16,6 +17,7 @@ fail() {
 [ -d "$workflow_dir" ] || fail "workflow directory does not exist: $workflow_dir"
 command -v ruby >/dev/null 2>&1 || fail "ruby is unavailable"
 [ -f "$structure_checker" ] && [ ! -L "$structure_checker" ] || fail "workflow structure checker is missing or symbolic"
+[ -x "$trusted_checker" ] && [ ! -L "$trusted_checker" ] || fail "trusted attestor checker is missing, non-executable, or symbolic"
 
 workflow_dir=$(cd "$workflow_dir" && pwd -P)
 default_workflow_dir=$(cd "$repo_root/.github/workflows" && pwd -P)
@@ -31,25 +33,31 @@ esac
 shopt -s nullglob dotglob
 workflow_files=("$workflow_dir"/*.yml "$workflow_dir"/*.yaml)
 if [ "$fixture_mode" = 0 ]; then
-  [ "${#workflow_files[@]}" -eq 2 ] || fail "workflow set must contain exactly ci.yml and codeql.yml"
+  [ "${#workflow_files[@]}" -eq 3 ] || fail "workflow set must contain exactly ci.yml, codeql.yml, and trusted-attestor.yml"
   found_ci=0
   found_codeql=0
+  found_trusted=0
   for workflow in "${workflow_files[@]}"; do
     [ -f "$workflow" ] && [ ! -L "$workflow" ] || fail "workflow files must be regular and non-symbolic"
     case "$(basename "$workflow")" in
       ci.yml) found_ci=1 ;;
       codeql.yml) found_codeql=1 ;;
+      trusted-attestor.yml) found_trusted=1 ;;
       *) fail "workflow set contains an unsupported filename" ;;
     esac
   done
-  [ "$found_ci" = 1 ] && [ "$found_codeql" = 1 ] ||
-    fail "workflow set must contain exactly ci.yml and codeql.yml"
+  [ "$found_ci" = 1 ] && [ "$found_codeql" = 1 ] && [ "$found_trusted" = 1 ] ||
+    fail "workflow set must contain exactly ci.yml, codeql.yml, and trusted-attestor.yml"
 fi
 
 workflow_count=0
 for workflow in "${workflow_files[@]}"; do
 	[ -f "$workflow" ] && [ ! -L "$workflow" ] || fail "workflow files must be regular and non-symbolic"
 	workflow_count=$((workflow_count + 1))
+	if [ "$(basename "$workflow")" = trusted-attestor.yml ]; then
+		"$trusted_checker" "$workflow" || fail "$workflow failed trusted attestor validation"
+		continue
+	fi
 
 	ruby "$structure_checker" "$workflow" "$repo_root" || fail "$workflow failed structured workflow validation"
 

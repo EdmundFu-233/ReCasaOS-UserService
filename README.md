@@ -37,6 +37,13 @@ The supported CI toolchain is exactly Go 1.26.6. GitHub Actions disables
 dependency caching, uses read-only permissions except for CodeQL result upload,
 and pins every action to a full commit SHA.
 
+The independent required status `ReCasaOS-UserService / trusted exact-SHA`
+is emitted only by a dedicated, repository-scoped GitHub App after live
+run/PR/tree validation and a separate no-upload CodeQL SARIF gate. Frozen
+trust-root changes use the owner-reviewed `prepare -> QA -> cleanup -> publish`
+promotion path described in
+[docs/trusted-attestor.md](docs/trusted-attestor.md).
+
 ```bash
 go generate ./...
 git diff --exit-code -- codegen/
