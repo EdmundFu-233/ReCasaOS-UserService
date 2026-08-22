@@ -227,12 +227,12 @@ expect_ci_reject "removed same-runner VM digest verification" \
   '286a91e596aba93a23364d260e5b640b04409dae263840f2399c7be41cc4db46' \
   'run command is not allowlisted'
 expect_ci_reject "mutable setup-go identity" \
-  $'      - name: Set up Go\n        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e' \
-  $'      - name: Set up Go\n        uses: actions/setup-go@1111111111111111111111111111111111111111' \
+  'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e' \
+  'actions/setup-go@1111111111111111111111111111111111111111' \
   'CI Go 1.26.6 step sequence is not exact'
 expect_ci_reject "required check display-name impersonator" \
   $'jobs:\n  workflow-policy:' $'jobs:\n  analyze-impostor:\n    name: Analyze Go\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    steps:\n      - name: No-op build\n        shell: bash\n        run: go build ./...\n  workflow-policy:' \
-  'CI workflow must contain exactly workflow-policy, diagnostic-codeql, and go jobs'
+  'CI workflow must contain exactly workflow-policy and go jobs'
 
 rm -f "$workflow_dir/test.yml" "$workflow_dir/ci.yml" "$workflow_dir/codeql.yml" "$workflow_dir/trusted-attestor.yml" "$workflow_dir/ci.yaml" "$workflow_dir/extra.yml"
 cp "$ci_source" "$workflow_dir/ci.yaml"

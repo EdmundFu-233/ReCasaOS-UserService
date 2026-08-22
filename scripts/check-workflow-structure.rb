@@ -23,12 +23,6 @@ ALLOWED_RUNS = [
   "go mod tidy -diff",
   "bash scripts/check-go-dependency-boundary.sh --tools-only",
   "go generate ./...\ngit diff --exit-code -- codegen/\ntest -z \"$(git status --porcelain --untracked-files=all)\"",
-  "go generate ./...\ngit diff --exit-code -- codegen/\ntest -z \"$(git status --porcelain=v1 --untracked-files=all)\"",
-  "test \"$(go version)\" = 'go version go1.26.6 linux/amd64'",
-  "test '${{ steps.diagnostic-init.outputs.codeql-version }}' = '2.26.3'",
-  "printf '%s  %s\\n' 'f68ba3d727eeb2879586ebbdf2914b93fe7a3f0c8aa8ac481ad29613c319f737' 'scripts/check-codeql-sarif.py' | sha256sum --check --strict",
-  "python3 scripts/check-codeql-sarif.py \"$RUNNER_TEMP/diagnostic-codeql-sarif\"",
-  "test -z \"$(git status --porcelain=v1 --untracked-files=all)\"",
   "bash scripts/check-go-dependency-boundary.sh --all",
   "go tool go-licenses check --include_tests ./... tool",
   "go test -race -count=1 ./...",
@@ -58,21 +52,6 @@ EXPECTED_CI_GO_STEPS = [
   ["Race tests", "run", "go test -race -count=1 ./..."],
   ["Vet", "run", "go vet ./..."],
   ["Reachable vulnerability policy", "run", "bash scripts/tests/check-govuln-policy_test.sh\nset -o pipefail\ngo tool govulncheck -json ./... |\n  go run ./scripts/govuln-policy.go security/govuln-allowlist.txt"]
-].freeze
-
-EXPECTED_CI_DIAGNOSTIC_CODEQL_STEPS = [
-  ["Checkout", "uses", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"],
-  ["Set up diagnostic Go", "uses", "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"],
-  ["Prove exact Go toolchain", "run", "test \"$(go version)\" = 'go version go1.26.6 linux/amd64'"],
-  ["Initialize diagnostic CodeQL without upload permission", "uses", "github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd"],
-  ["Prove exact diagnostic CodeQL CLI", "run", "test '${{ steps.diagnostic-init.outputs.codeql-version }}' = '2.26.3'"],
-  ["Preflight selected Go tool package boundary", "run", "bash scripts/check-go-dependency-boundary.sh --tools-only"],
-  ["Generate APIs and verify tracked outputs", "run", "go generate ./...\ngit diff --exit-code -- codegen/\ntest -z \"$(git status --porcelain=v1 --untracked-files=all)\""],
-  ["Build for diagnostic CodeQL", "run", "go build ./..."],
-  ["Analyze locally without uploading SARIF or a database", "uses", "github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd"],
-  ["Verify the trusted SARIF gate before execution", "run", "printf '%s  %s\\n' 'f68ba3d727eeb2879586ebbdf2914b93fe7a3f0c8aa8ac481ad29613c319f737' 'scripts/check-codeql-sarif.py' | sha256sum --check --strict"],
-  ["Reject diagnostic High-or-higher SARIF results", "run", "python3 scripts/check-codeql-sarif.py \"$RUNNER_TEMP/diagnostic-codeql-sarif\""],
-  ["Reprove clean checkout after diagnostic analysis", "run", "test -z \"$(git status --porcelain=v1 --untracked-files=all)\""]
 ].freeze
 
 EXPECTED_CODEQL_STEPS = [
@@ -206,13 +185,8 @@ jobs.each do |job_name, job|
 	timeout = job["timeout-minutes"]
 	maximum_timeout = File.basename(path) == "ci.yml" && job_name == "go" ? 60 : 30
 	reject("job #{job_name} must have a bounded timeout") unless timeout.is_a?(Integer) && timeout.between?(1, maximum_timeout)
-	if job.key?("env")
-    expected_env = if File.basename(path) == "ci.yml" && job_name == "diagnostic-codeql"
-      { "CODEQL_OVERLAY_DATABASE_MODE" => "none", "GOTOOLCHAIN" => "local" }
-    else
-      { "GOTOOLCHAIN" => "local" }
-    end
-		reject("job #{job_name} has an unsupported environment") unless job["env"] == expected_env
+	if job.key?("env") && job["env"] != { "GOTOOLCHAIN" => "local" }
+		reject("job #{job_name} has an unsupported environment")
 	end
   steps = job["steps"]
   reject("job #{job_name} steps must be an array") unless steps.is_a?(Array)
@@ -225,7 +199,7 @@ jobs.each do |job_name, job|
   end
   steps.each_with_index do |step, index|
     reject("job #{job_name} step #{index + 1} must be a mapping") unless step.is_a?(Hash)
-	allowed_step_keys = ["name", "id", "uses", "with", "run", "shell"]
+	allowed_step_keys = ["name", "uses", "with", "run", "shell"]
 	unknown_step_keys = step.keys - allowed_step_keys
 	reject("job #{job_name} step #{index + 1} contains unsupported keys") unless unknown_step_keys.empty?
 	reject("job #{job_name} step #{index + 1} name must be a string") if step.key?("name") && !step["name"].is_a?(String)
@@ -247,14 +221,6 @@ jobs.each do |job_name, job|
       reject("job #{job_name} step #{index + 1} uses a non-allowlisted action")
     end
 	reject("job #{job_name} step #{index + 1} action cannot declare shell") if step.key?("shell")
-    if step.key?("id")
-      exact_diagnostic_init =
-        File.basename(path) == "ci.yml" &&
-        job_name == "diagnostic-codeql" &&
-        action == "github/codeql-action/init" &&
-        step["id"] == "diagnostic-init"
-      reject("job #{job_name} step #{index + 1} action id is not exact") unless exact_diagnostic_init
-    end
 
     inputs = step.fetch("with", {})
     reject("job #{job_name} step #{index + 1} with must be a mapping") unless inputs.is_a?(Hash)
@@ -271,29 +237,9 @@ jobs.each do |job_name, job|
 		expected = { "go-version" => "1.26.6", "check-latest" => false, "cache" => false }
 		reject("setup-go inputs are not exact") unless inputs == expected
 	when "github/codeql-action/init"
-		expected = if File.basename(path) == "ci.yml" && job_name == "diagnostic-codeql"
-      {
-        "languages" => "go",
-        "build-mode" => "manual",
-        "tools" => "linked",
-        "trap-caching" => false,
-        "dependency-caching" => false
-      }
-    else
-      { "languages" => "go" }
-    end
-		reject("CodeQL init inputs are not exact") unless inputs == expected
+		reject("CodeQL init inputs are not exact") unless inputs == { "languages" => "go" }
 	when "github/codeql-action/analyze"
-		expected = if File.basename(path) == "ci.yml" && job_name == "diagnostic-codeql"
-      {
-        "upload" => "never",
-        "upload-database" => false,
-        "output" => "${{ runner.temp }}/diagnostic-codeql-sarif"
-      }
-    else
-      {}
-    end
-		reject("CodeQL analyze inputs are not exact") unless inputs == expected
+		reject("CodeQL analyze must not have inputs") unless inputs.empty?
 	end
   end
 end
@@ -302,7 +248,7 @@ if File.basename(path) == "ci.yml"
   reject("CI workflow name is not exact") unless document["name"] == "CI"
   validate_exact_main_triggers(document, "CI workflow")
   reject("CI workflow root permissions are not exact") unless document["permissions"] == { "contents" => "read" }
-  reject("CI workflow must contain exactly workflow-policy, diagnostic-codeql, and go jobs") unless jobs.keys == ["workflow-policy", "diagnostic-codeql", "go"]
+  reject("CI workflow must contain exactly workflow-policy and go jobs") unless jobs.keys == ["workflow-policy", "go"]
   policy_job = jobs["workflow-policy"]
   expected_policy_metadata = {
     "name" => "Workflow policy",
@@ -318,30 +264,6 @@ if File.basename(path) == "ci.yml"
     [step["name"], kind, payload]
   end
   reject("CI Workflow policy step sequence is not exact") unless policy_signatures == EXPECTED_CI_POLICY_STEPS
-  diagnostic_job = jobs["diagnostic-codeql"]
-  expected_diagnostic_metadata = {
-    "name" => "Diagnostic CodeQL SARIF contract",
-    "needs" => ["workflow-policy"],
-    "runs-on" => "ubuntu-24.04",
-    "timeout-minutes" => 30,
-    "permissions" => {
-      "actions" => "read",
-      "contents" => "read"
-    },
-    "env" => {
-      "CODEQL_OVERLAY_DATABASE_MODE" => "none",
-      "GOTOOLCHAIN" => "local"
-    }
-  }
-  actual_diagnostic_metadata = diagnostic_job.reject { |key, _value| key == "steps" }
-  reject("CI diagnostic CodeQL job metadata is not exact") unless actual_diagnostic_metadata == expected_diagnostic_metadata
-  diagnostic_signatures = diagnostic_job.fetch("steps", []).map do |step|
-    kind = step.key?("uses") ? "uses" : "run"
-    payload = step[kind]
-    payload = payload.strip if kind == "run" && payload.is_a?(String)
-    [step["name"], kind, payload]
-  end
-  reject("CI diagnostic CodeQL step sequence is not exact") unless diagnostic_signatures == EXPECTED_CI_DIAGNOSTIC_CODEQL_STEPS
   go_job = jobs["go"]
   reject("CI Go 1.26.6 job is missing") unless go_job.is_a?(Hash)
   expected_metadata = {
