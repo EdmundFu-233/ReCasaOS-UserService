@@ -12,7 +12,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 workflow=${1:-"$repo_root/.github/workflows/trusted-attestor.yml"}
 
-expected_workflow_sha256=58267b3ace83f91e9dab4d0287000cb71a846f8a085ad60c14ac98a237edafc0
+expected_workflow_sha256=acd189aec833fc369cae5ea2b22f5062797feb5c96ba6b8cd9bb527e1807d396
 expected_validator_sha256=8114a162fc4bb5fe74f56ffd2810077d53baed22c4dd03a27f938c982a537cc0
 expected_sarif_checker_sha256=d0ab7cc61d4cd24214be471c33030d1249ba239c0730fd327a078cfbe008e27d
 expected_vm_host_sha256=186a91e596aba93a23364d260e5b640b04409dae263840f2399c7be41cc4db46
@@ -56,23 +56,23 @@ actual_vm_guest_sha256=$(sha256sum "$repo_root/scripts/tests/test-systemd-lifecy
 
 [[ "$(grep -Fc "$expected_validator_sha256" "$workflow")" == 2 ]] ||
   fail "workflow does not verify the trusted validator in both API jobs"
-[[ "$(grep -Fc "$expected_sarif_checker_sha256" "$workflow")" == 1 ]] ||
-  fail "automatic analysis does not verify the exact default-branch SARIF checker"
+[[ "$(grep -Fc "$expected_sarif_checker_sha256" "$workflow")" == 2 ]] ||
+  fail "automatic and diagnostic analyses do not verify the exact SARIF checker"
 [[ "$(grep -Fc 'needs.prepare-promotion.outputs.sarif_checker_sha256' "$workflow")" == 3 ]] ||
   fail "manual promotion does not propagate the exact reviewed SARIF checker"
 [[ "$(grep -Fc 'needs.promoted-qa.outputs.verified_sarif_checker_sha256' "$workflow")" == 1 ]] ||
   fail "manual publisher does not consume the QA-verified SARIF checker identity"
-[[ "$(grep -Fc 'upload: never' "$workflow")" == 2 ]] ||
+[[ "$(grep -Fc 'upload: never' "$workflow")" == 3 ]] ||
   fail "independent CodeQL upload prohibition is not exact"
-[[ "$(grep -Fc 'tools: linked' "$workflow")" == 2 ]] ||
+[[ "$(grep -Fc 'tools: linked' "$workflow")" == 3 ]] ||
   fail "independent CodeQL bundle linkage is not exact"
-[[ "$(grep -Fc "run: test \"\$ACTUAL_CODEQL_VERSION\" = '2.26.3'" "$workflow")" == 2 ]] ||
+[[ "$(grep -Fc "run: test \"\$ACTUAL_CODEQL_VERSION\" = '2.26.3'" "$workflow")" == 3 ]] ||
   fail "independent CodeQL runtime version proof is not exact"
-[[ "$(grep -Fc 'trap-caching: false' "$workflow")" == 2 ]] ||
+[[ "$(grep -Fc 'trap-caching: false' "$workflow")" == 3 ]] ||
   fail "independent CodeQL TRAP cache prohibition is not exact"
-[[ "$(grep -Fc 'dependency-caching: false' "$workflow")" == 2 ]] ||
+[[ "$(grep -Fc 'dependency-caching: false' "$workflow")" == 3 ]] ||
   fail "independent CodeQL dependency cache prohibition is not exact"
-[[ "$(grep -Fc 'CODEQL_OVERLAY_DATABASE_MODE: none' "$workflow")" == 2 ]] ||
+[[ "$(grep -Fc 'CODEQL_OVERLAY_DATABASE_MODE: none' "$workflow")" == 3 ]] ||
   fail "independent CodeQL overlay cache prohibition is not exact"
 ! grep -Fq 'security-events: write' "$workflow" ||
   fail "trusted workflow grants a forbidden SARIF upload permission"

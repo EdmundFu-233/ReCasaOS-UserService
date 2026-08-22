@@ -1,6 +1,9 @@
 name: Trusted exact-SHA attestor
 
 on:
+  pull_request:
+    branches:
+      - main
   workflow_run:
     workflows:
       - CI
@@ -23,6 +26,98 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  diagnostic-codeql-pr:
+    name: Diagnostic Ubuntu CodeQL SARIF contract
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CODEQL_OVERLAY_DATABASE_MODE: none
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove the diagnostic checkout
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+      - name: Set up exact Go 1.26.6 without shared cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          check-latest: false
+          cache: false
+      - name: Prove exact Go toolchain
+        shell: bash
+        run: test "$(go version)" = 'go version go1.26.6 linux/amd64'
+      - name: Initialize diagnostic CodeQL without upload permission
+        id: diagnostic-init
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: go
+          build-mode: manual
+          tools: linked
+          trap-caching: false
+          dependency-caching: false
+      - name: Prove exact diagnostic CodeQL CLI
+        shell: bash
+        env:
+          ACTUAL_CODEQL_VERSION: ${{ steps.diagnostic-init.outputs.codeql-version }}
+        run: test "$ACTUAL_CODEQL_VERSION" = '2.26.3'
+      - name: Preflight selected Go tool package boundary
+        shell: bash
+        run: bash scripts/check-go-dependency-boundary.sh --tools-only
+      - name: Generate APIs and verify tracked outputs
+        shell: bash
+        run: |
+          go generate ./...
+          git diff --exit-code -- codegen/
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Build the exact pull request head for CodeQL
+        shell: bash
+        run: go build ./...
+      - name: Analyze locally without uploading SARIF or a database
+        id: diagnostic-analysis
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          upload: never
+          upload-database: false
+          output: ${{ runner.temp }}/diagnostic-codeql-sarif
+      - name: Verify the trusted SARIF gate before execution
+        shell: bash
+        run: >-
+          printf '%s  %s\n'
+          'd0ab7cc61d4cd24214be471c33030d1249ba239c0730fd327a078cfbe008e27d'
+          'scripts/check-codeql-sarif.py' | sha256sum --check --strict
+      - name: Reject diagnostic High-or-higher SARIF results
+        shell: bash
+        env:
+          ACTUAL_SARIF_DIRECTORY: ${{ steps.diagnostic-analysis.outputs.sarif-output }}
+          EXPECTED_SARIF_DIRECTORY: ${{ runner.temp }}/diagnostic-codeql-sarif
+        run: |
+          set -Eeuo pipefail
+          [[ "$ACTUAL_SARIF_DIRECTORY" == "$EXPECTED_SARIF_DIRECTORY" ]]
+          python3 scripts/check-codeql-sarif.py "$ACTUAL_SARIF_DIRECTORY"
+      - name: Reprove immutable checkout after diagnostic analysis
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
   validate-automatic:
     name: Validate automatic exact-SHA evidence
     if: >-
