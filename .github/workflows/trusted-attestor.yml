@@ -1,0 +1,766 @@
+name: Trusted exact-SHA attestor
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+  repository_dispatch:
+    types:
+      - trusted-attestor-promote
+
+permissions: {}
+
+env:
+  STATUS_CONTEXT: ReCasaOS-UserService / trusted exact-SHA
+
+concurrency:
+  group: >-
+    trusted-attestor-${{ github.event_name }}-${{
+    github.event.workflow_run.id || github.event.client_payload.pull_request }}-${{
+    github.event.workflow_run.head_sha || github.event.client_payload.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate-automatic:
+    name: Validate automatic exact-SHA evidence
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.action == 'completed' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      run_id: ${{ steps.validate.outputs.run_id }}
+      run_url: ${{ steps.validate.outputs.run_url }}
+      pull_request: ${{ steps.validate.outputs.pull_request }}
+      head_sha: ${{ steps.validate.outputs.head_sha }}
+      head_tree: ${{ steps.validate.outputs.head_tree }}
+      default_sha: ${{ steps.validate.outputs.default_sha }}
+      default_tree: ${{ steps.validate.outputs.default_tree }}
+    steps:
+      - name: Check out only the protected default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the trusted validator before execution
+        shell: bash
+        run: >-
+          printf '%s  %s\n'
+          '8114a162fc4bb5fe74f56ffd2810077d53baed22c4dd03a27f938c982a537cc0'
+          'scripts/trusted_attestor.py' | sha256sum --check --strict
+      - name: Validate immutable run, PR, checks, and frozen trees
+        id: validate
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/trusted_attestor.py automatic
+
+  independent-codeql:
+    name: Independently reject High-or-higher CodeQL results
+    needs:
+      - validate-automatic
+    if: needs.validate-automatic.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CODEQL_OVERLAY_DATABASE_MODE: none
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out only the validated exact head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-automatic.outputs.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove the independent analysis checkout
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.validate-automatic.outputs.head_sha }}
+          EXPECTED_TREE: ${{ needs.validate-automatic.outputs.head_tree }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ "$(git show -s --format=%T HEAD)" == "$EXPECTED_TREE" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+      - name: Set up exact Go 1.26.6 without shared cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          check-latest: false
+          cache: false
+      - name: Prove exact Go toolchain
+        shell: bash
+        run: test "$(go version)" = 'go version go1.26.6 linux/amd64'
+      - name: Initialize independent CodeQL without upload permission
+        id: independent-init
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: go
+          build-mode: manual
+          tools: linked
+          trap-caching: false
+          dependency-caching: false
+      - name: Prove exact independent CodeQL CLI
+        shell: bash
+        env:
+          ACTUAL_CODEQL_VERSION: ${{ steps.independent-init.outputs.codeql-version }}
+        run: test "$ACTUAL_CODEQL_VERSION" = '2.26.3'
+      - name: Preflight selected Go tool package boundary
+        shell: bash
+        run: bash scripts/check-go-dependency-boundary.sh --tools-only
+      - name: Generate APIs and verify tracked outputs
+        shell: bash
+        run: |
+          go generate ./...
+          git diff --exit-code -- codegen/
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Build the exact validated head for CodeQL
+        shell: bash
+        run: go build ./...
+      - name: Analyze locally without uploading SARIF or a database
+        id: independent-analysis
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          upload: never
+          upload-database: false
+          output: ${{ runner.temp }}/trusted-codeql-sarif
+      - name: Verify the trusted SARIF gate before execution
+        shell: bash
+        run: >-
+          printf '%s  %s\n'
+          'd0ab7cc61d4cd24214be471c33030d1249ba239c0730fd327a078cfbe008e27d'
+          'scripts/check-codeql-sarif.py' | sha256sum --check --strict
+      - name: Reject independent High-or-higher SARIF results
+        shell: bash
+        env:
+          ACTUAL_SARIF_DIRECTORY: ${{ steps.independent-analysis.outputs.sarif-output }}
+          EXPECTED_SARIF_DIRECTORY: ${{ runner.temp }}/trusted-codeql-sarif
+        run: |
+          set -Eeuo pipefail
+          [[ "$ACTUAL_SARIF_DIRECTORY" == "$EXPECTED_SARIF_DIRECTORY" ]]
+          python3 scripts/check-codeql-sarif.py "$ACTUAL_SARIF_DIRECTORY"
+      - name: Reprove immutable checkout after independent analysis
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.validate-automatic.outputs.head_sha }}
+          EXPECTED_TREE: ${{ needs.validate-automatic.outputs.head_tree }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ "$(git show -s --format=%T HEAD)" == "$EXPECTED_TREE" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+  publish-automatic:
+    name: Publish App-backed automatic status
+    needs:
+      - validate-automatic
+      - independent-codeql
+    if: >-
+      needs.validate-automatic.result == 'success' &&
+      needs.independent-codeql.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: trusted-attestor
+    permissions: {}
+    steps:
+      - name: Mint repository-scoped trusted App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.TRUSTED_ATTESTOR_APP_ID }}
+          private-key: ${{ secrets.TRUSTED_ATTESTOR_PRIVATE_KEY }}
+          owner: EdmundFu-233
+          repositories: ReCasaOS-UserService
+          skip-token-revoke: false
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-statuses: write
+      - name: Revalidate live identities and publish exact-head success
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+          REPOSITORY: EdmundFu-233/ReCasaOS-UserService
+          REPOSITORY_ID: "1341287306"
+          DEFAULT_BRANCH: main
+          RUN_ID: ${{ needs.validate-automatic.outputs.run_id }}
+          RUN_URL: ${{ needs.validate-automatic.outputs.run_url }}
+          PR_NUMBER: ${{ needs.validate-automatic.outputs.pull_request }}
+          EXPECTED_SHA: ${{ needs.validate-automatic.outputs.head_sha }}
+          EXPECTED_TREE: ${{ needs.validate-automatic.outputs.head_tree }}
+          DEFAULT_SHA: ${{ needs.validate-automatic.outputs.default_sha }}
+          DEFAULT_TREE: ${{ needs.validate-automatic.outputs.default_tree }}
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          fail() {
+            printf 'automatic App publisher refused: %s\n' "$*" >&2
+            exit 1
+          }
+
+          resolve_exact_pull_request() {
+            local associated exact
+            associated="$(
+              gh api -X GET "repos/$REPOSITORY/commits/$EXPECTED_SHA/pulls" \
+                -f per_page=100 -f page=1
+            )"
+            [[ "$(jq 'length' <<<"$associated")" -lt 100 ]] ||
+              fail "associated pull requests exceed one complete bounded page"
+            exact="$(
+              jq -c \
+                --argjson repository_id "$REPOSITORY_ID" \
+                --arg repository "$REPOSITORY" \
+                --arg default_branch "$DEFAULT_BRANCH" \
+                --arg default_sha "$DEFAULT_SHA" \
+                --arg head_sha "$EXPECTED_SHA" \
+                '[.[] | select(
+                  .state == "open" and
+                  .base.repo.id == $repository_id and
+                  .base.repo.full_name == $repository and
+                  .base.ref == $default_branch and
+                  .base.sha == $default_sha and
+                  .head.repo.id == $repository_id and
+                  .head.repo.full_name == $repository and
+                  .head.sha == $head_sha and
+                  (
+                    .author_association == "OWNER" or
+                    .author_association == "MEMBER" or
+                    .author_association == "COLLABORATOR"
+                  )
+                )]' \
+                <<<"$associated"
+            )"
+            [[ "$(jq 'length' <<<"$exact")" == 1 ]] ||
+              fail "head is not bound to exactly one current trusted pull request"
+            [[ "$(jq -r '.[0].number' <<<"$exact")" == "$PR_NUMBER" ]] ||
+              fail "associated pull request number changed"
+            printf '%s' "$exact"
+          }
+
+          command -v gh >/dev/null 2>&1 || fail "gh is unavailable"
+          command -v jq >/dev/null 2>&1 || fail "jq is unavailable"
+          [[ "$INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] || fail "installation id is malformed"
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail "run id is malformed"
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || fail "pull request number is malformed"
+          for identity in "$EXPECTED_SHA" "$EXPECTED_TREE" "$DEFAULT_SHA" "$DEFAULT_TREE"; do
+            [[ "$identity" =~ ^[0-9a-f]{40}$ ]] || fail "commit identity is malformed"
+          done
+          [[ "$RUN_URL" == "https://github.com/$REPOSITORY/actions/runs/$RUN_ID" ]] ||
+            fail "run URL is not exact"
+
+          installation="$(gh api -X GET /installation/repositories -f per_page=100)"
+          [[ "$(jq -r '.total_count' <<<"$installation")" == 1 ]] ||
+            fail "App token is not scoped to exactly one repository"
+          [[ "$(jq -r '.repositories | length' <<<"$installation")" == 1 ]] ||
+            fail "App token repository page is incomplete"
+          [[ "$(jq -r '.repositories[0].id' <<<"$installation")" == "$REPOSITORY_ID" ]] ||
+            fail "App token is scoped to another repository"
+          [[ "$(jq -r '.repositories[0].full_name' <<<"$installation")" == "$REPOSITORY" ]] ||
+            fail "App token repository name is not exact"
+
+          run_json="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID")"
+          [[ "$(jq -r '.id' <<<"$run_json")" == "$RUN_ID" ]] || fail "run id changed"
+          [[ "$(jq -r '.name' <<<"$run_json")" == CI ]] || fail "run name changed"
+          [[ "$(jq -r '.workflow_id' <<<"$run_json")" == 339058307 ]] ||
+            fail "run workflow id changed"
+          [[ "$(jq -r '.path' <<<"$run_json")" == .github/workflows/ci.yml ]] ||
+            fail "run workflow path changed"
+          [[ "$(jq -r '.event' <<<"$run_json")" == pull_request ]] || fail "run event changed"
+          [[ "$(jq -r '.status' <<<"$run_json")" == completed ]] || fail "run is incomplete"
+          [[ "$(jq -r '.conclusion' <<<"$run_json")" == success ]] || fail "run is not successful"
+          [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$EXPECTED_SHA" ]] || fail "run head moved"
+          [[ "$(jq -r '.repository.id' <<<"$run_json")" == "$REPOSITORY_ID" ]] ||
+            fail "run repository id changed"
+          [[ "$(jq -r '.head_repository.id' <<<"$run_json")" == "$REPOSITORY_ID" ]] ||
+            fail "run head repository changed"
+
+          resolve_exact_pull_request >/dev/null
+
+          current_default="$(gh api "repos/$REPOSITORY/git/ref/heads/$DEFAULT_BRANCH")"
+          [[ "$(jq -r '.ref' <<<"$current_default")" == "refs/heads/$DEFAULT_BRANCH" ]] ||
+            fail "default ref changed"
+          [[ "$(jq -r '.object.type' <<<"$current_default")" == commit ]] ||
+            fail "default ref is not a commit"
+          [[ "$(jq -r '.object.sha' <<<"$current_default")" == "$DEFAULT_SHA" ]] ||
+            fail "default branch moved after validation"
+          [[ "$(gh api "repos/$REPOSITORY/git/commits/$EXPECTED_SHA" --jq '.tree.sha')" == "$EXPECTED_TREE" ]] ||
+            fail "head tree changed"
+          [[ "$(gh api "repos/$REPOSITORY/git/commits/$DEFAULT_SHA" --jq '.tree.sha')" == "$DEFAULT_TREE" ]] ||
+            fail "default tree changed"
+
+          resolve_exact_pull_request >/dev/null
+          gh api --method POST "repos/$REPOSITORY/statuses/$EXPECTED_SHA" \
+            -f state=success \
+            -f "context=$STATUS_CONTEXT" \
+            -f description='Trusted App verified CI, independent CodeQL, policy, and SHA' \
+            -f "target_url=$RUN_URL" >/dev/null
+          printf 'Published App-backed automatic status for %s\n' "$EXPECTED_SHA"
+
+  prepare-promotion:
+    name: Validate and pin manual promotion
+    if: >-
+      github.event_name == 'repository_dispatch' &&
+      github.event.action == 'trusted-attestor-promote' &&
+      github.actor == github.repository_owner &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      pull_request: ${{ steps.prepare.outputs.pull_request }}
+      head_sha: ${{ steps.prepare.outputs.head_sha }}
+      head_tree: ${{ steps.prepare.outputs.head_tree }}
+      default_sha: ${{ steps.prepare.outputs.default_sha }}
+      default_tree: ${{ steps.prepare.outputs.default_tree }}
+      trusted_branch: ${{ steps.prepare.outputs.trusted_branch }}
+      sarif_checker_sha256: ${{ steps.prepare.outputs.sarif_checker_sha256 }}
+      host_sha256: ${{ steps.prepare.outputs.host_sha256 }}
+      guest_sha256: ${{ steps.prepare.outputs.guest_sha256 }}
+    steps:
+      - name: Check out only the protected default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the trusted validator before execution
+        shell: bash
+        run: >-
+          printf '%s  %s\n'
+          '8114a162fc4bb5fe74f56ffd2810077d53baed22c4dd03a27f938c982a537cc0'
+          'scripts/trusted_attestor.py' | sha256sum --check --strict
+      - name: Validate reviewed identities and create one-time ref
+        id: prepare
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/trusted_attestor.py manual-prepare
+
+  promoted-qa:
+    name: Run promoted exact-SHA Go and Debian QA
+    needs:
+      - prepare-promotion
+    if: needs.prepare-promotion.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CODEQL_OVERLAY_DATABASE_MODE: none
+      GOTOOLCHAIN: local
+    outputs:
+      verified_sha: ${{ steps.identity.outputs.verified_sha }}
+      verified_tree: ${{ steps.identity.outputs.verified_tree }}
+      verified_sarif_checker_sha256: ${{ steps.identity.outputs.verified_sarif_checker_sha256 }}
+      verified_host_sha256: ${{ steps.identity.outputs.verified_host_sha256 }}
+      verified_guest_sha256: ${{ steps.identity.outputs.verified_guest_sha256 }}
+    steps:
+      - name: Check out the one-time same-repository ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare-promotion.outputs.trusted_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove commit, tree, harness, and clean identity
+        id: identity
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.prepare-promotion.outputs.head_sha }}
+          EXPECTED_TREE: ${{ needs.prepare-promotion.outputs.head_tree }}
+          EXPECTED_SARIF_CHECKER_SHA256: ${{ needs.prepare-promotion.outputs.sarif_checker_sha256 }}
+          EXPECTED_HOST_SHA256: ${{ needs.prepare-promotion.outputs.host_sha256 }}
+          EXPECTED_GUEST_SHA256: ${{ needs.prepare-promotion.outputs.guest_sha256 }}
+        run: |
+          set -Eeuo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git show -s --format=%T HEAD)"
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]]
+          [[ "$actual_tree" == "$EXPECTED_TREE" ]]
+          printf '%s  %s\n' \
+            "$EXPECTED_SARIF_CHECKER_SHA256" 'scripts/check-codeql-sarif.py' \
+            "$EXPECTED_HOST_SHA256" 'scripts/tests/check-debian11-systemd-vm.sh' \
+            "$EXPECTED_GUEST_SHA256" 'scripts/tests/test-systemd-lifecycle.sh' | \
+            sha256sum --check --strict
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          {
+            printf 'verified_sha=%s\n' "$actual_sha"
+            printf 'verified_tree=%s\n' "$actual_tree"
+            printf 'verified_sarif_checker_sha256=%s\n' "$EXPECTED_SARIF_CHECKER_SHA256"
+            printf 'verified_host_sha256=%s\n' "$EXPECTED_HOST_SHA256"
+            printf 'verified_guest_sha256=%s\n' "$EXPECTED_GUEST_SHA256"
+          } >>"$GITHUB_OUTPUT"
+      - name: Test and enforce workflow policy
+        shell: bash
+        run: |
+          bash scripts/tests/check-workflow-policy_test.sh
+          bash scripts/check-workflow-policy.sh
+      - name: Set up exact Go 1.26.6 without shared cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          check-latest: false
+          cache: false
+      - name: Prove exact Go toolchain
+        shell: bash
+        run: test "$(go version)" = 'go version go1.26.6 linux/amd64'
+      - name: Install isolated Debian VM tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cloud-image-utils qemu-system-x86 qemu-utils
+      - name: Exercise local administrator lifecycle under systemd 247 PID 1
+        shell: bash
+        env:
+          RECASAOS_TRUSTED_PROMOTION_SHA: ${{ needs.prepare-promotion.outputs.head_sha }}
+          RECASAOS_TRUSTED_PROMOTION_TREE: ${{ needs.prepare-promotion.outputs.head_tree }}
+          RECASAOS_TRUSTED_PROMOTION_HOST_SHA256: ${{ needs.prepare-promotion.outputs.host_sha256 }}
+          RECASAOS_TRUSTED_PROMOTION_GUEST_SHA256: ${{ needs.prepare-promotion.outputs.guest_sha256 }}
+        run: bash scripts/tests/check-debian11-systemd-vm.sh
+      - name: Verify module graph
+        shell: bash
+        run: go mod tidy -diff
+      - name: Preflight selected Go tool package boundary
+        shell: bash
+        run: bash scripts/check-go-dependency-boundary.sh --tools-only
+      - name: Initialize promoted CodeQL without upload permission
+        id: promoted-init
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: go
+          build-mode: manual
+          tools: linked
+          trap-caching: false
+          dependency-caching: false
+      - name: Prove exact promoted CodeQL CLI
+        shell: bash
+        env:
+          ACTUAL_CODEQL_VERSION: ${{ steps.promoted-init.outputs.codeql-version }}
+        run: test "$ACTUAL_CODEQL_VERSION" = '2.26.3'
+      - name: Generate APIs and verify tracked outputs
+        shell: bash
+        run: |
+          go generate ./...
+          git diff --exit-code -- codegen/
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Build the promoted exact head for CodeQL
+        shell: bash
+        run: go build ./...
+      - name: Analyze promoted head without uploading SARIF or a database
+        id: promoted-analysis
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          upload: never
+          upload-database: false
+          output: ${{ runner.temp }}/trusted-promoted-codeql-sarif
+      - name: Verify the trusted SARIF gate before promoted execution
+        shell: bash
+        env:
+          EXPECTED_SARIF_CHECKER_SHA256: ${{ needs.prepare-promotion.outputs.sarif_checker_sha256 }}
+        run: >-
+          printf '%s  %s\n'
+          "$EXPECTED_SARIF_CHECKER_SHA256"
+          'scripts/check-codeql-sarif.py' | sha256sum --check --strict
+      - name: Reject promoted High-or-higher SARIF results
+        shell: bash
+        env:
+          ACTUAL_SARIF_DIRECTORY: ${{ steps.promoted-analysis.outputs.sarif-output }}
+          EXPECTED_SARIF_DIRECTORY: ${{ runner.temp }}/trusted-promoted-codeql-sarif
+        run: |
+          set -Eeuo pipefail
+          [[ "$ACTUAL_SARIF_DIRECTORY" == "$EXPECTED_SARIF_DIRECTORY" ]]
+          python3 scripts/check-codeql-sarif.py "$ACTUAL_SARIF_DIRECTORY"
+      - name: Enforce Linux test, release, and tool package boundaries
+        shell: bash
+        run: bash scripts/check-go-dependency-boundary.sh --all
+      - name: Enforce dependency license policy
+        shell: bash
+        run: go tool go-licenses check --include_tests ./... tool
+      - name: Race tests
+        shell: bash
+        run: go test -race -count=1 ./...
+      - name: Vet
+        shell: bash
+        run: go vet ./...
+      - name: Reachable vulnerability policy
+        shell: bash
+        run: |
+          bash scripts/tests/check-govuln-policy_test.sh
+          set -o pipefail
+          go tool govulncheck -json ./... |
+            go run ./scripts/govuln-policy.go security/govuln-allowlist.txt
+      - name: Reprove immutable checkout after QA
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.prepare-promotion.outputs.head_sha }}
+          EXPECTED_TREE: ${{ needs.prepare-promotion.outputs.head_tree }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ "$(git show -s --format=%T HEAD)" == "$EXPECTED_TREE" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+  cleanup-promotion:
+    name: Delete and verify one-time ref removal
+    needs:
+      - prepare-promotion
+      - promoted-qa
+    if: >-
+      always() &&
+      needs.prepare-promotion.result == 'success' &&
+      github.event_name == 'repository_dispatch' &&
+      github.event.action == 'trusted-attestor-promote' &&
+      github.actor == github.repository_owner &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      removed: ${{ steps.cleanup.outputs.removed }}
+    steps:
+      - name: Delete only the exact unmoved ref and prove absence
+        id: cleanup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: EdmundFu-233/ReCasaOS-UserService
+          PR_NUMBER: ${{ needs.prepare-promotion.outputs.pull_request }}
+          EXPECTED_SHA: ${{ needs.prepare-promotion.outputs.head_sha }}
+          TRUSTED_BRANCH: ${{ needs.prepare-promotion.outputs.trusted_branch }}
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          fail() {
+            printf 'trusted-ref cleanup refused: %s\n' "$*" >&2
+            exit 1
+          }
+
+          command -v gh >/dev/null 2>&1 || fail "gh is unavailable"
+          command -v jq >/dev/null 2>&1 || fail "jq is unavailable"
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || fail "pull request number is malformed"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "head SHA is malformed"
+          [[ "$TRUSTED_BRANCH" =~ ^ci/trusted-pr-${PR_NUMBER}-${EXPECTED_SHA}-[0-9a-f]{32}$ ]] ||
+            fail "trusted branch identity is malformed"
+          trusted_ref="refs/heads/$TRUSTED_BRANCH"
+          refs="$(
+            gh api -X GET "repos/$REPOSITORY/git/matching-refs/heads/$TRUSTED_BRANCH" \
+              -f per_page=100 -f page=1
+          )"
+          [[ "$(jq 'length' <<<"$refs")" -lt 100 ]] ||
+            fail "matching trusted refs exceed one complete bounded page"
+          mapfile -t exact_shas < <(
+            jq -r --arg ref "$trusted_ref" \
+              '.[] | select(.ref == $ref) | .object.sha' <<<"$refs"
+          )
+          [[ "${#exact_shas[@]}" == 1 ]] || fail "prepared ref is missing or duplicated"
+          [[ "${exact_shas[0]}" == "$EXPECTED_SHA" ]] || fail "trusted ref moved"
+          gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$TRUSTED_BRANCH" >/dev/null
+          remaining="$(
+            gh api -X GET "repos/$REPOSITORY/git/matching-refs/heads/$TRUSTED_BRANCH" \
+              -f per_page=100 -f page=1
+          )"
+          [[ "$(jq 'length' <<<"$remaining")" -lt 100 ]] ||
+            fail "post-delete matching refs exceed one complete bounded page"
+          [[ "$(jq --arg ref "$trusted_ref" '[.[] | select(.ref == $ref)] | length' <<<"$remaining")" == 0 ]] ||
+            fail "trusted ref still exists after deletion"
+          printf 'removed=true\n' >>"$GITHUB_OUTPUT"
+          printf 'Deleted and verified absence of %s\n' "$trusted_ref"
+
+  publish-promotion:
+    name: Publish App-backed promoted status
+    needs:
+      - prepare-promotion
+      - promoted-qa
+      - cleanup-promotion
+    if: >-
+      always() &&
+      needs.prepare-promotion.result == 'success' &&
+      needs.promoted-qa.result == 'success' &&
+      needs.cleanup-promotion.result == 'success' &&
+      needs.cleanup-promotion.outputs.removed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: trusted-attestor
+    permissions: {}
+    steps:
+      - name: Mint repository-scoped trusted App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.TRUSTED_ATTESTOR_APP_ID }}
+          private-key: ${{ secrets.TRUSTED_ATTESTOR_PRIVATE_KEY }}
+          owner: EdmundFu-233
+          repositories: ReCasaOS-UserService
+          skip-token-revoke: false
+          permission-actions: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-statuses: write
+      - name: Revalidate cleanup, QA, blobs, and publish exact-head success
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+          REPOSITORY: EdmundFu-233/ReCasaOS-UserService
+          REPOSITORY_ID: "1341287306"
+          DEFAULT_BRANCH: main
+          PR_NUMBER: ${{ needs.prepare-promotion.outputs.pull_request }}
+          EXPECTED_SHA: ${{ needs.prepare-promotion.outputs.head_sha }}
+          EXPECTED_TREE: ${{ needs.prepare-promotion.outputs.head_tree }}
+          DEFAULT_SHA: ${{ needs.prepare-promotion.outputs.default_sha }}
+          DEFAULT_TREE: ${{ needs.prepare-promotion.outputs.default_tree }}
+          TRUSTED_BRANCH: ${{ needs.prepare-promotion.outputs.trusted_branch }}
+          EXPECTED_SARIF_CHECKER_SHA256: ${{ needs.prepare-promotion.outputs.sarif_checker_sha256 }}
+          EXPECTED_HOST_SHA256: ${{ needs.prepare-promotion.outputs.host_sha256 }}
+          EXPECTED_GUEST_SHA256: ${{ needs.prepare-promotion.outputs.guest_sha256 }}
+          VERIFIED_SHA: ${{ needs.promoted-qa.outputs.verified_sha }}
+          VERIFIED_TREE: ${{ needs.promoted-qa.outputs.verified_tree }}
+          VERIFIED_SARIF_CHECKER_SHA256: ${{ needs.promoted-qa.outputs.verified_sarif_checker_sha256 }}
+          VERIFIED_HOST_SHA256: ${{ needs.promoted-qa.outputs.verified_host_sha256 }}
+          VERIFIED_GUEST_SHA256: ${{ needs.promoted-qa.outputs.verified_guest_sha256 }}
+          REF_REMOVED: ${{ needs.cleanup-promotion.outputs.removed }}
+          RUN_URL: >-
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
+            github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          fail() {
+            printf 'manual App publisher refused: %s\n' "$*" >&2
+            exit 1
+          }
+
+          resolve_exact_pull_request() {
+            local associated exact
+            associated="$(
+              gh api -X GET "repos/$REPOSITORY/commits/$EXPECTED_SHA/pulls" \
+                -f per_page=100 -f page=1
+            )"
+            [[ "$(jq 'length' <<<"$associated")" -lt 100 ]] ||
+              fail "associated pull requests exceed one complete bounded page"
+            exact="$(
+              jq -c \
+                --argjson repository_id "$REPOSITORY_ID" \
+                --arg repository "$REPOSITORY" \
+                --arg default_branch "$DEFAULT_BRANCH" \
+                --arg default_sha "$DEFAULT_SHA" \
+                --arg head_sha "$EXPECTED_SHA" \
+                '[.[] | select(
+                  .state == "open" and
+                  .base.repo.id == $repository_id and
+                  .base.repo.full_name == $repository and
+                  .base.ref == $default_branch and
+                  .base.sha == $default_sha and
+                  .head.repo.id == $repository_id and
+                  .head.repo.full_name == $repository and
+                  .head.sha == $head_sha and
+                  (
+                    .author_association == "OWNER" or
+                    .author_association == "MEMBER" or
+                    .author_association == "COLLABORATOR"
+                  )
+                )]' \
+                <<<"$associated"
+            )"
+            [[ "$(jq 'length' <<<"$exact")" == 1 ]] ||
+              fail "head is not bound to exactly one current trusted pull request"
+            [[ "$(jq -r '.[0].number' <<<"$exact")" == "$PR_NUMBER" ]] ||
+              fail "associated pull request number changed"
+            printf '%s' "$exact"
+          }
+
+          command -v gh >/dev/null 2>&1 || fail "gh is unavailable"
+          command -v jq >/dev/null 2>&1 || fail "jq is unavailable"
+          [[ "$INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] || fail "installation id is malformed"
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || fail "pull request number is malformed"
+          for identity in "$EXPECTED_SHA" "$EXPECTED_TREE" "$DEFAULT_SHA" "$DEFAULT_TREE"; do
+            [[ "$identity" =~ ^[0-9a-f]{40}$ ]] || fail "commit identity is malformed"
+          done
+          for digest in "$EXPECTED_SARIF_CHECKER_SHA256" "$EXPECTED_HOST_SHA256" "$EXPECTED_GUEST_SHA256"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "harness digest is malformed"
+          done
+          [[ "$VERIFIED_SHA" == "$EXPECTED_SHA" ]] || fail "QA verified another commit"
+          [[ "$VERIFIED_TREE" == "$EXPECTED_TREE" ]] || fail "QA verified another tree"
+          [[ "$VERIFIED_SARIF_CHECKER_SHA256" == "$EXPECTED_SARIF_CHECKER_SHA256" ]] ||
+            fail "QA verified another SARIF checker"
+          [[ "$VERIFIED_HOST_SHA256" == "$EXPECTED_HOST_SHA256" ]] || fail "QA verified another host harness"
+          [[ "$VERIFIED_GUEST_SHA256" == "$EXPECTED_GUEST_SHA256" ]] || fail "QA verified another guest harness"
+          [[ "$REF_REMOVED" == true ]] || fail "cleanup evidence is missing"
+          [[ "$TRUSTED_BRANCH" =~ ^ci/trusted-pr-${PR_NUMBER}-${EXPECTED_SHA}-[0-9a-f]{32}$ ]] ||
+            fail "trusted branch identity is malformed"
+
+          installation="$(gh api -X GET /installation/repositories -f per_page=100)"
+          [[ "$(jq -r '.total_count' <<<"$installation")" == 1 ]] ||
+            fail "App token is not scoped to exactly one repository"
+          [[ "$(jq -r '.repositories | length' <<<"$installation")" == 1 ]] ||
+            fail "App token repository page is incomplete"
+          [[ "$(jq -r '.repositories[0].id' <<<"$installation")" == "$REPOSITORY_ID" ]] ||
+            fail "App token repository id is not exact"
+
+          resolve_exact_pull_request >/dev/null
+          [[ "$(gh api "repos/$REPOSITORY/git/commits/$EXPECTED_SHA" --jq '.tree.sha')" == "$EXPECTED_TREE" ]] ||
+            fail "head tree changed"
+
+          current_default="$(gh api "repos/$REPOSITORY/git/ref/heads/$DEFAULT_BRANCH")"
+          [[ "$(jq -r '.object.type' <<<"$current_default")" == commit ]] || fail "default ref is not a commit"
+          [[ "$(jq -r '.object.sha' <<<"$current_default")" == "$DEFAULT_SHA" ]] ||
+            fail "default branch moved"
+          [[ "$(gh api "repos/$REPOSITORY/git/commits/$DEFAULT_SHA" --jq '.tree.sha')" == "$DEFAULT_TREE" ]] ||
+            fail "default tree changed"
+
+          trusted_ref="refs/heads/$TRUSTED_BRANCH"
+          remaining="$(
+            gh api -X GET "repos/$REPOSITORY/git/matching-refs/heads/$TRUSTED_BRANCH" \
+              -f per_page=100 -f page=1
+          )"
+          [[ "$(jq 'length' <<<"$remaining")" -lt 100 ]] ||
+            fail "publisher matching refs exceed one complete bounded page"
+          [[ "$(jq --arg ref "$trusted_ref" '[.[] | select(.ref == $ref)] | length' <<<"$remaining")" == 0 ]] ||
+            fail "one-time trusted ref was recreated"
+
+          sarif_checker_content="$(
+            gh api -X GET "repos/$REPOSITORY/contents/scripts/check-codeql-sarif.py" \
+              -f "ref=$EXPECTED_SHA" --jq '.content'
+          )"
+          host_content="$(
+            gh api -X GET "repos/$REPOSITORY/contents/scripts/tests/check-debian11-systemd-vm.sh" \
+              -f "ref=$EXPECTED_SHA" --jq '.content'
+          )"
+          guest_content="$(
+            gh api -X GET "repos/$REPOSITORY/contents/scripts/tests/test-systemd-lifecycle.sh" \
+              -f "ref=$EXPECTED_SHA" --jq '.content'
+          )"
+          sarif_checker_sha256="$(printf '%s' "$sarif_checker_content" | base64 --decode | sha256sum | awk '{print $1}')"
+          host_sha256="$(printf '%s' "$host_content" | base64 --decode | sha256sum | awk '{print $1}')"
+          guest_sha256="$(printf '%s' "$guest_content" | base64 --decode | sha256sum | awk '{print $1}')"
+          [[ "$sarif_checker_sha256" == "$EXPECTED_SARIF_CHECKER_SHA256" ]] ||
+            fail "SARIF checker blob changed"
+          [[ "$host_sha256" == "$EXPECTED_HOST_SHA256" ]] || fail "host harness blob changed"
+          [[ "$guest_sha256" == "$EXPECTED_GUEST_SHA256" ]] || fail "guest harness blob changed"
+
+          resolve_exact_pull_request >/dev/null
+          gh api --method POST "repos/$REPOSITORY/statuses/$EXPECTED_SHA" \
+            -f state=success \
+            -f "context=$STATUS_CONTEXT" \
+            -f description='Trusted App verified promoted Go, CodeQL, and Debian SHA' \
+            -f "target_url=$RUN_URL" >/dev/null
+          printf 'Published App-backed promoted status for %s\n' "$EXPECTED_SHA"
