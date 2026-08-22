@@ -142,7 +142,7 @@ jobs:
         shell: bash
         run: >-
           printf '%s  %s\n'
-          'f68ba3d727eeb2879586ebbdf2914b93fe7a3f0c8aa8ac481ad29613c319f737'
+          'd282fd283694b2762e0bedf0c9033e36f0dc76f6c3fc388414634296d9d49f29'
           'scripts/check-codeql-sarif.py' | sha256sum --check --strict
       - name: Reject independent High-or-higher SARIF results
         shell: bash

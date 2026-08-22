@@ -531,8 +531,9 @@ def validate_sarif(document_value: Any) -> tuple[int, int]:
     require("externalPropertyFileReferences" not in run, "external SARIF property files are not accepted")
     properties = object_value(run.get("properties"), "SARIF run.properties")
     require(properties.get("semmle.formatSpecifier") == "sarif-latest", "SARIF was not produced with sarif-latest")
+    column_kind = run.get("columnKind")
     require(
-        run.get("columnKind") in CODEQL_COLUMN_KINDS,
+        isinstance(column_kind, str) and column_kind in CODEQL_COLUMN_KINDS,
         "SARIF columnKind is not a supported CodeQL coordinate kind",
     )
     if "newlineSequences" in run:

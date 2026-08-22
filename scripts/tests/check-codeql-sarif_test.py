@@ -197,14 +197,16 @@ class SarifPolicyTests(unittest.TestCase):
             policy.validate_sarif(document)
 
     def test_high_and_critical_results_refuse_at_inclusive_threshold(self):
-        for severity in ("7", "7.0", "8.9", "9.1", "10", "10.0"):
-            document = sarif_document()
-            document["runs"][0]["tool"]["extensions"][0]["rules"][0]["properties"][
-                "security-severity"
-            ] = severity
-            with self.subTest(severity=severity):
-                with self.assertRaises(policy.SarifPolicyError):
-                    policy.validate_sarif(document)
+        for column_kind in ("unicodeCodePoints", "utf16CodeUnits"):
+            for severity in ("7", "7.0", "8.9", "9.1", "10", "10.0"):
+                document = sarif_document()
+                document["runs"][0]["columnKind"] = column_kind
+                document["runs"][0]["tool"]["extensions"][0]["rules"][0]["properties"][
+                    "security-severity"
+                ] = severity
+                with self.subTest(column_kind=column_kind, severity=severity):
+                    with self.assertRaises(policy.SarifPolicyError):
+                        policy.validate_sarif(document)
 
     def test_high_result_refuses_even_if_suppressed_or_unchanged(self):
         document = sarif_document()
@@ -432,7 +434,20 @@ class SarifPolicyTests(unittest.TestCase):
 
     def test_unknown_column_kind_and_optional_newline_sequences_refuse(self):
         variants = []
-        for column_kind in (None, "", "bytes", "UnicodeCodePoints"):
+        missing_column = sarif_document()
+        del missing_column["runs"][0]["columnKind"]
+        variants.append(missing_column)
+        for column_kind in (
+            None,
+            "",
+            "bytes",
+            "utf8CodeUnits",
+            "UnicodeCodePoints",
+            [],
+            {},
+            1,
+            True,
+        ):
             wrong_column = sarif_document()
             wrong_column["runs"][0]["columnKind"] = column_kind
             variants.append(wrong_column)
