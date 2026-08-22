@@ -26,7 +26,7 @@ ALLOWED_RUNS = [
   "go generate ./...\ngit diff --exit-code -- codegen/\ntest -z \"$(git status --porcelain=v1 --untracked-files=all)\"",
   "test \"$(go version)\" = 'go version go1.26.6 linux/amd64'",
   "test '${{ steps.diagnostic-init.outputs.codeql-version }}' = '2.26.3'",
-  "printf '%s  %s\\n' 'd0ab7cc61d4cd24214be471c33030d1249ba239c0730fd327a078cfbe008e27d' 'scripts/check-codeql-sarif.py' | sha256sum --check --strict",
+  "printf '%s  %s\\n' 'f68ba3d727eeb2879586ebbdf2914b93fe7a3f0c8aa8ac481ad29613c319f737' 'scripts/check-codeql-sarif.py' | sha256sum --check --strict",
   "python3 scripts/check-codeql-sarif.py \"$RUNNER_TEMP/diagnostic-codeql-sarif\"",
   "test -z \"$(git status --porcelain=v1 --untracked-files=all)\"",
   "bash scripts/check-go-dependency-boundary.sh --all",
@@ -70,7 +70,7 @@ EXPECTED_CI_DIAGNOSTIC_CODEQL_STEPS = [
   ["Generate APIs and verify tracked outputs", "run", "go generate ./...\ngit diff --exit-code -- codegen/\ntest -z \"$(git status --porcelain=v1 --untracked-files=all)\""],
   ["Build for diagnostic CodeQL", "run", "go build ./..."],
   ["Analyze locally without uploading SARIF or a database", "uses", "github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd"],
-  ["Verify the trusted SARIF gate before execution", "run", "printf '%s  %s\\n' 'd0ab7cc61d4cd24214be471c33030d1249ba239c0730fd327a078cfbe008e27d' 'scripts/check-codeql-sarif.py' | sha256sum --check --strict"],
+  ["Verify the trusted SARIF gate before execution", "run", "printf '%s  %s\\n' 'f68ba3d727eeb2879586ebbdf2914b93fe7a3f0c8aa8ac481ad29613c319f737' 'scripts/check-codeql-sarif.py' | sha256sum --check --strict"],
   ["Reject diagnostic High-or-higher SARIF results", "run", "python3 scripts/check-codeql-sarif.py \"$RUNNER_TEMP/diagnostic-codeql-sarif\""],
   ["Reprove clean checkout after diagnostic analysis", "run", "test -z \"$(git status --porcelain=v1 --untracked-files=all)\""]
 ].freeze

@@ -88,7 +88,7 @@ jobs:
         shell: bash
         run: >-
           printf '%s  %s\n'
-          'd0ab7cc61d4cd24214be471c33030d1249ba239c0730fd327a078cfbe008e27d'
+          'f68ba3d727eeb2879586ebbdf2914b93fe7a3f0c8aa8ac481ad29613c319f737'
           'scripts/check-codeql-sarif.py' | sha256sum --check --strict
       - name: Reject diagnostic High-or-higher SARIF results
         shell: bash

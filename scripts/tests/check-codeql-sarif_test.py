@@ -423,11 +423,19 @@ class SarifPolicyTests(unittest.TestCase):
                 with self.assertRaises(policy.SarifPolicyError):
                     policy.validate_sarif(document)
 
-    def test_column_kind_and_optional_newline_sequences_are_exact(self):
+    def test_both_real_codeql_column_kinds_pass(self):
+        for column_kind in ("unicodeCodePoints", "utf16CodeUnits"):
+            document = sarif_document()
+            document["runs"][0]["columnKind"] = column_kind
+            with self.subTest(column_kind=column_kind):
+                self.assertEqual(policy.validate_sarif(document), (2, 1))
+
+    def test_unknown_column_kind_and_optional_newline_sequences_refuse(self):
         variants = []
-        wrong_column = sarif_document()
-        wrong_column["runs"][0]["columnKind"] = "utf16CodeUnits"
-        variants.append(wrong_column)
+        for column_kind in (None, "", "bytes", "UnicodeCodePoints"):
+            wrong_column = sarif_document()
+            wrong_column["runs"][0]["columnKind"] = column_kind
+            variants.append(wrong_column)
         for newline_value in (None, [], "\n", [""], ["12345"]):
             document = sarif_document()
             document["runs"][0]["newlineSequences"] = newline_value

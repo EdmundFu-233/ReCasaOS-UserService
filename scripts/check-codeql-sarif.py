@@ -31,6 +31,7 @@ SARIF_SCHEMA_URIS = frozenset(
 CODEQL_DRIVER = "CodeQL"
 CODEQL_ORGANIZATION = "GitHub"
 CODEQL_VERSION = "2.26.3"
+CODEQL_COLUMN_KINDS = frozenset({"unicodeCodePoints", "utf16CodeUnits"})
 HIGH_SECURITY_SEVERITY = Decimal("7.0")
 MAX_SARIF_BYTES = 10 * 1024 * 1024
 MAX_RULES = 25_000
@@ -530,7 +531,10 @@ def validate_sarif(document_value: Any) -> tuple[int, int]:
     require("externalPropertyFileReferences" not in run, "external SARIF property files are not accepted")
     properties = object_value(run.get("properties"), "SARIF run.properties")
     require(properties.get("semmle.formatSpecifier") == "sarif-latest", "SARIF was not produced with sarif-latest")
-    require(run.get("columnKind") == "unicodeCodePoints", "SARIF columnKind is not CodeQL's unicodeCodePoints")
+    require(
+        run.get("columnKind") in CODEQL_COLUMN_KINDS,
+        "SARIF columnKind is not a supported CodeQL coordinate kind",
+    )
     if "newlineSequences" in run:
         newline_sequences = array_value(run["newlineSequences"], "SARIF run.newlineSequences")
         require(
