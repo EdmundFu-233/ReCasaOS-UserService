@@ -15,7 +15,7 @@ workflow=${1:-"$repo_root/.github/workflows/trusted-attestor.yml"}
 expected_workflow_sha256=03d5afaece1da99b3f408cb0a4aa83633ba3b7b54673536e5dca78be4f8e2762
 expected_validator_sha256=8114a162fc4bb5fe74f56ffd2810077d53baed22c4dd03a27f938c982a537cc0
 expected_sarif_checker_sha256=d282fd283694b2762e0bedf0c9033e36f0dc76f6c3fc388414634296d9d49f29
-expected_vm_host_sha256=186a91e596aba93a23364d260e5b640b04409dae263840f2399c7be41cc4db46
+expected_vm_host_sha256=3f9b709de64a0fc72aec81c8fbe47c93905364b0b50e8eaffcd6bf989eb71394
 expected_vm_guest_sha256=32c8a77d66ef4953355338c4fc532f9bf94e39f469b4ac5ef11d627f9a9e8519
 
 [[ "$(basename -- "$workflow")" == trusted-attestor.yml ]] ||
