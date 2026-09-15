@@ -223,8 +223,8 @@ expect_ci_reject "changed early VM step identity" \
   '      - name: Install isolated Debian VM tools' '      - name: Renamed isolated Debian VM tools' \
   'CI Go 1.26.6 step sequence is not exact'
 expect_ci_reject "removed same-runner VM digest verification" \
-  '186a91e596aba93a23364d260e5b640b04409dae263840f2399c7be41cc4db46' \
-  '286a91e596aba93a23364d260e5b640b04409dae263840f2399c7be41cc4db46' \
+  '3f9b709de64a0fc72aec81c8fbe47c93905364b0b50e8eaffcd6bf989eb71394' \
+  '2f9b709de64a0fc72aec81c8fbe47c93905364b0b50e8eaffcd6bf989eb71394' \
   'run command is not allowlisted'
 expect_ci_reject "mutable setup-go identity" \
   'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e' \

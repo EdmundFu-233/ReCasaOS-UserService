@@ -348,6 +348,20 @@ users:
       - $guest_public_key
 ssh_pwauth: false
 disable_root: true
+# Historical compatibility fixture only: the live bullseye mirrors no longer
+# serve reliably, so pin the official Debian and Debian-security snapshots at
+# 20260828T000000Z. Only the snapshot Release Valid-Until expiry is disabled;
+# the Debian archive keyring, Release signatures, and package hashes remain
+# required, and APT index failures remain fatal.
+apt_preserve_sources_list: false
+apt:
+  preserve_sources_list: false
+  sources_list: |
+    deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://snapshot.debian.org/archive/debian/20260828T000000Z/ bullseye main
+    deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://snapshot.debian.org/archive/debian-security/20260828T000000Z/ bullseye-security main
+  conf: |
+    APT::Update::Error-Mode "any";
+    Acquire::Retries "3";
 package_update: true
 package_upgrade: false
 packages:
