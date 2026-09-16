@@ -9,7 +9,7 @@ VM_LIFECYCLE_RUN = "bash scripts/tests/check-debian11-systemd-vm.sh".freeze
 VM_SCRIPT_VERIFY_RUN = <<~'BASH'.strip.freeze
   printf '%s  %s\n' \
     '3f9b709de64a0fc72aec81c8fbe47c93905364b0b50e8eaffcd6bf989eb71394' 'scripts/tests/check-debian11-systemd-vm.sh' \
-    '32c8a77d66ef4953355338c4fc532f9bf94e39f469b4ac5ef11d627f9a9e8519' 'scripts/tests/test-systemd-lifecycle.sh' |
+    'b636fc7c681cebf1239269089edbc2e9c912afda4198b1815696d140a94368c5' 'scripts/tests/test-systemd-lifecycle.sh' |
     sha256sum --check --strict
   test -z "$(git status --porcelain --untracked-files=all)"
 BASH
@@ -66,7 +66,7 @@ EXPECTED_CODEQL_STEPS = [
 
 EXPECTED_VM_SCRIPT_SHA256 = {
   "scripts/tests/check-debian11-systemd-vm.sh" => "3f9b709de64a0fc72aec81c8fbe47c93905364b0b50e8eaffcd6bf989eb71394",
-  "scripts/tests/test-systemd-lifecycle.sh" => "32c8a77d66ef4953355338c4fc532f9bf94e39f469b4ac5ef11d627f9a9e8519"
+  "scripts/tests/test-systemd-lifecycle.sh" => "b636fc7c681cebf1239269089edbc2e9c912afda4198b1815696d140a94368c5"
 }.freeze
 
 def reject(message)
