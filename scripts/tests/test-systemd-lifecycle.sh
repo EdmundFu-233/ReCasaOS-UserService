@@ -86,10 +86,11 @@ cleanup() {
   trap - EXIT
   set +e
   systemctl stop casaos-user-service.service recasaos-user-password-reset.service \
+    recasaos-user-account-password-reset.service \
     recasaos-user-bootstrap.service casaos-message-bus.service >/dev/null 2>&1
   rm -f -- /run/casaos/user-service.url /run/casaos/management.url /run/casaos/message-bus.url \
     /run/casaos/recasaos-userservice-e2e-stub-state.json
-  rm -rf -- /run/recasaos-user-bootstrap /run/recasaos-user-password-reset
+  rm -rf -- /run/recasaos-user-bootstrap /run/recasaos-user-password-reset /run/recasaos-user-account-password-reset
   case "$evidence_dir" in
     /run/recasaos-userservice-e2e-[0-9]*-[0-9]*)
       [[ ! -L "$evidence_dir" ]] && rm -rf -- "$evidence_dir"
@@ -104,12 +105,14 @@ database_path=$database_dir/user.db
 seal_path=/etc/casaos/recasaos-user-bootstrap.seal
 bootstrap_source=/run/recasaos-user-bootstrap
 reset_source=/run/recasaos-user-password-reset
+user_reset_source=/run/recasaos-user-account-password-reset
 service_address_file=/run/casaos/user-service.url
 
 [[ ! -e "$database_path" && ! -L "$database_path" ]] || fail "the guest already contains a user database"
 [[ ! -e "$seal_path" && ! -L "$seal_path" ]] || fail "the guest already contains a bootstrap seal"
 [[ ! -e "$bootstrap_source" && ! -L "$bootstrap_source" ]] || fail "bootstrap credential source already exists"
 [[ ! -e "$reset_source" && ! -L "$reset_source" ]] || fail "reset credential source already exists"
+[[ ! -e "$user_reset_source" && ! -L "$user_reset_source" ]] || fail "user reset credential source already exists"
 for install_target in \
   /usr/bin/casaos-user-service \
   /usr/local/libexec/recasaos-e2e-casaos-stub \
@@ -117,7 +120,8 @@ for install_target in \
   /etc/systemd/system/casaos-message-bus.service \
   /etc/systemd/system/casaos-user-service.service \
   /etc/systemd/system/recasaos-user-bootstrap.service \
-  /etc/systemd/system/recasaos-user-password-reset.service
+  /etc/systemd/system/recasaos-user-password-reset.service \
+  /etc/systemd/system/recasaos-user-account-password-reset.service
 do
   [[ ! -e "$install_target" && ! -L "$install_target" ]] || fail "guest install target already exists"
 done
@@ -136,6 +140,9 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
   "$repo_root/build/sysroot/usr/lib/systemd/system/recasaos-user-password-reset.service" \
   /etc/systemd/system/recasaos-user-password-reset.service
+install -o root -g root -m 0644 \
+  "$repo_root/build/sysroot/usr/lib/systemd/system/recasaos-user-account-password-reset.service" \
+  /etc/systemd/system/recasaos-user-account-password-reset.service
 
 install -o root -g root -m 0600 /dev/null "$evidence_dir/stub-ready"
 cat >"$evidence_dir/fake-casaos.py" <<'PYTHON'
@@ -262,11 +269,14 @@ systemd-analyze verify \
   /etc/systemd/system/casaos-message-bus.service \
   /etc/systemd/system/casaos-user-service.service \
   /etc/systemd/system/recasaos-user-bootstrap.service \
-  /etc/systemd/system/recasaos-user-password-reset.service
+  /etc/systemd/system/recasaos-user-password-reset.service \
+  /etc/systemd/system/recasaos-user-account-password-reset.service
 [[ "$(systemctl show recasaos-user-bootstrap.service --property=UnitFileState --value)" == static ]] ||
   fail "bootstrap unit is unexpectedly enableable"
 [[ "$(systemctl show recasaos-user-password-reset.service --property=UnitFileState --value)" == static ]] ||
   fail "password-reset unit is unexpectedly enableable"
+[[ "$(systemctl show recasaos-user-account-password-reset.service --property=UnitFileState --value)" == static ]] ||
+  fail "user-account-password-reset unit is unexpectedly enableable"
 systemctl start casaos-message-bus.service
 stub_deadline=$((SECONDS + 20))
 until [[ -s /run/casaos/management.url && -s /run/casaos/message-bus.url ]] &&
@@ -309,6 +319,15 @@ prepare_reset_source() {
   install -d -o root -g root -m 0700 "$reset_source"
   write_private "$reset_source/username" "$username"
   write_private "$reset_source/new-password" "$password"
+}
+
+prepare_user_reset_source() {
+  local username=$1
+  local password=$2
+  rm -rf -- "$user_reset_source"
+  install -d -o root -g root -m 0700 "$user_reset_source"
+  write_private "$user_reset_source/username" "$username"
+  write_private "$user_reset_source/new-password" "$password"
 }
 
 assert_oneshot_success() {
@@ -948,6 +967,166 @@ refresh_request "$evidence_dir/new-refreshed-refresh-token" 200 "$evidence_dir/n
 extract_refresh_pair "$evidence_dir/new-refresh-chain.json" new-chain
 phase "password rotation, explicit restart, and old access/refresh revocation"
 
+legacy_user_username='legacy-user-e2e'
+user_missing_username='missing-user-e2e'
+user_first_password='ReCasaOS-E2E-user-reset-password-01'
+write_private "$evidence_dir/user-username" "$legacy_user_username"
+write_private "$evidence_dir/user-first-password" "$user_first_password"
+write_private "$evidence_dir/user-missing-username" "$user_missing_username"
+write_private "$evidence_dir/user-legacy-password" "$legacy_verifier"
+
+# Fixture one legacy non-administrator beside the migrated administrator.
+# The daemon is running; use a bounded busy timeout instead of stopping it,
+# so the gateway registration count only grows by the one restart below.
+sqlite3 "$database_path" "PRAGMA busy_timeout=5000;
+INSERT INTO o_users(id, username, password, role, email, nickname, avatar, description, created_at, updated_at)
+VALUES(8, 'legacy-user-e2e', '12121b2b7fdedd5ec5777926650d7119', 'user',
+  'legacy-user@example.invalid', 'Legacy User', 'user-avatar-marker', 'user-profile-marker',
+  '2026-08-20 00:00:00', '2026-08-20 00:00:00');"
+chmod 0600 "$database_path"
+[[ "$(sqlite3 -batch -noheader "$database_path" 'SELECT COUNT(*) FROM o_users;')" == 2 ]] ||
+  fail "legacy non-administrator fixture did not land"
+user_db_hash=$(sha256sum "$database_path" | awk '{ print $1 }')
+user_profile_before=$(sqlite3 -batch -noheader "$database_path" \
+  "SELECT id || '|' || username || '|' || role || '|' || email || '|' || nickname || '|' || avatar || '|' || description FROM o_users WHERE id = 8;")
+admin_verifier_before=$(sqlite3 -batch -noheader "$database_path" "SELECT password FROM o_users WHERE id = 7;")
+user_state_before=$(sqlite3 -batch -noheader "$database_path" \
+  "SELECT installation_id || '|' || status || '|' || admin_user_id || '|' || quote(initialized_at) || '|' || quote(created_at) || '|' || quote(updated_at) FROM o_bootstrap_state WHERE id = 1;")
+user_seal_before=$(<"$seal_path")
+user_daemon_pid=$(systemctl show casaos-user-service.service --property=MainPID --value)
+user_daemon_start=$(process_start_time "$user_daemon_pid") || fail "could not record the pre-reset daemon identity"
+user_address=$(<"$evidence_dir/service-address")
+[[ "$(curl --silent --show-error --output "$evidence_dir/pre-user-reset-jwks.json" --write-out '%{http_code}' "$user_address/.well-known/jwks.json")" == 200 ]] ||
+  fail "could not read the pre-reset JWKS"
+pre_user_jwks_material=$(validated_jwks_material "$evidence_dir/pre-user-reset-jwks.json") ||
+  fail "the pre-reset JWKS is not an exact public P-256 key set"
+
+user_login_body() {
+  local password_file=$1
+  local prefix=$2
+  jq -n --rawfile username "$evidence_dir/user-username" --rawfile password "$password_file" \
+    '{username: $username, password: $password}' >"$evidence_dir/${prefix}-login-request.json"
+  chmod 0600 "$evidence_dir/${prefix}-login-request.json"
+}
+
+user_login_success() {
+  local password_file=$1
+  local prefix=$2
+  user_login_body "$password_file" "$prefix"
+  local address status
+  address=$(<"$evidence_dir/service-address")
+  status=$(curl --silent --show-error --request POST \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$evidence_dir/${prefix}-login-request.json" \
+    --output "$evidence_dir/${prefix}-login-response.json" \
+    --write-out '%{http_code}' "$address/v1/users/login")
+  [[ "$status" == 200 ]] || fail "expected a successful non-administrator login"
+  jq -e '.success == 200 and (.data.user.id == 8 and .data.user.username == "legacy-user-e2e" and (.data.user | has("password") | not))' \
+    "$evidence_dir/${prefix}-login-response.json" >/dev/null || fail "non-administrator login response is malformed"
+  jq -rj '.data.token.access_token' "$evidence_dir/${prefix}-login-response.json" >"$evidence_dir/${prefix}-access-token"
+  chmod 0600 "$evidence_dir/${prefix}-access-token"
+  assert_compact_token_file "$evidence_dir/${prefix}-access-token"
+}
+
+user_login_failure() {
+  local password_file=$1
+  local prefix=$2
+  user_login_body "$password_file" "$prefix"
+  local address status
+  address=$(<"$evidence_dir/service-address")
+  status=$(curl --silent --show-error --request POST \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$evidence_dir/${prefix}-login-request.json" \
+    --output "$evidence_dir/${prefix}-login-response.json" \
+    --write-out '%{http_code}' "$address/v1/users/login")
+  [[ "$status" == 400 ]] || fail "rejected non-administrator password did not return HTTP 400"
+  jq -e '.success == 10013 and (.data == null)' "$evidence_dir/${prefix}-login-response.json" >/dev/null ||
+    fail "rejected non-administrator password response is malformed"
+}
+
+install -d -o root -g root -m 0700 "$evidence_dir/user-lock-credentials"
+write_private "$evidence_dir/user-lock-credentials/recasaos.user.username" "$legacy_user_username"
+write_private "$evidence_dir/user-lock-credentials/recasaos.user.new-password" "$user_first_password"
+if runuser -u nobody -- env CREDENTIALS_DIRECTORY="$evidence_dir/user-lock-credentials" \
+  /usr/bin/casaos-user-service reset-user-password -c /etc/casaos/user-service.conf \
+  >"$evidence_dir/user-nonroot-reset.out" 2>&1
+then
+  fail "non-root user password reset unexpectedly succeeded"
+fi
+grep -Fq 'reset-user-password requires effective uid 0' "$evidence_dir/user-nonroot-reset.out" ||
+  fail "non-root user reset did not fail at the effective-UID boundary"
+[[ "$(sha256sum "$database_path" | awk '{ print $1 }')" == "$user_db_hash" ]] ||
+  fail "non-root user reset changed the database"
+[[ ! -e "$seal_path" || "$(<"$seal_path")" == "$user_seal_before" ]] || fail "non-root user reset changed the seal"
+
+prepare_user_reset_source "$user_missing_username" "$user_first_password"
+if systemctl start recasaos-user-account-password-reset.service >"$evidence_dir/user-missing-reset.out" 2>&1; then
+  fail "password reset for a missing user unexpectedly succeeded"
+fi
+assert_oneshot_failure recasaos-user-account-password-reset.service
+assert_sources_removed "$user_reset_source" username new-password
+[[ "$(sqlite3 -batch -noheader "$database_path" "SELECT password FROM o_users WHERE id = 8;")" == "$legacy_verifier" ]] ||
+  fail "failed user reset changed the legacy verifier"
+[[ "$(sqlite3 -batch -noheader "$database_path" 'SELECT COUNT(*) FROM o_users;')" == 2 ]] ||
+  fail "failed user reset changed the user count"
+[[ "$(sha256sum "$database_path" | awk '{ print $1 }')" == "$user_db_hash" ]] ||
+  fail "failed user reset changed the database bytes"
+systemctl reset-failed recasaos-user-account-password-reset.service
+
+prepare_user_reset_source "$legacy_username" "$user_first_password"
+if systemctl start recasaos-user-account-password-reset.service >"$evidence_dir/user-admin-reset.out" 2>&1; then
+  fail "password reset targeting an administrator unexpectedly succeeded"
+fi
+assert_oneshot_failure recasaos-user-account-password-reset.service
+assert_sources_removed "$user_reset_source" username new-password
+[[ "$(sqlite3 -batch -noheader "$database_path" "SELECT password FROM o_users WHERE id = 7;")" == "$admin_verifier_before" ]] ||
+  fail "refused administrator-target reset changed the administrator verifier"
+systemctl reset-failed recasaos-user-account-password-reset.service
+
+prepare_user_reset_source "$legacy_user_username" "$user_first_password"
+systemctl start recasaos-user-account-password-reset.service
+assert_oneshot_success recasaos-user-account-password-reset.service
+assert_sources_removed "$user_reset_source" username new-password
+systemctl is-active --quiet casaos-user-service.service && fail "user password-reset conflict did not stop the daemon"
+exact_process_live "$user_daemon_pid" "$user_daemon_start" && fail "the old daemon remained live after user password reset"
+user_verifier_after=$(sqlite3 -batch -noheader "$database_path" "SELECT password FROM o_users WHERE id = 8;")
+[[ "$user_verifier_after" == \$argon2id\$* && "$user_verifier_after" != "$legacy_verifier" ]] ||
+  fail "user password reset did not replace the Argon2id verifier"
+[[ "$(sqlite3 -batch -noheader "$database_path" \
+  "SELECT id || '|' || username || '|' || role || '|' || email || '|' || nickname || '|' || avatar || '|' || description FROM o_users WHERE id = 8;")" == "$user_profile_before" ]] ||
+  fail "user password reset changed account identity or profile"
+[[ "$(sqlite3 -batch -noheader "$database_path" "SELECT password FROM o_users WHERE id = 7;")" == "$admin_verifier_before" ]] ||
+  fail "user password reset changed the administrator verifier"
+[[ "$(sqlite3 -batch -noheader "$database_path" 'SELECT COUNT(*) FROM o_users;')" == 2 ]] ||
+  fail "user password reset changed the user count"
+[[ "$(sqlite3 -batch -noheader "$database_path" \
+  "SELECT installation_id || '|' || status || '|' || admin_user_id || '|' || quote(initialized_at) || '|' || quote(created_at) || '|' || quote(updated_at) FROM o_bootstrap_state WHERE id = 1;")" == "$user_state_before" ]] ||
+  fail "user password reset changed initialization state"
+[[ "$(<"$seal_path")" == "$user_seal_before" ]] || fail "user password reset changed the seal"
+
+rm -f -- "$service_address_file"
+start_daemon_or_fail user-reset
+wait_for_daemon || fail "the UserService daemon did not restart after user password reset"
+user_new_pid=$(systemctl show casaos-user-service.service --property=MainPID --value)
+user_new_start=$(process_start_time "$user_new_pid") || fail "could not record the restarted daemon identity"
+[[ "$user_new_pid:$user_new_start" != "$user_daemon_pid:$user_daemon_start" ]] || fail "daemon restart reused the old process identity"
+user_new_address=$(<"$evidence_dir/service-address")
+[[ "$(curl --silent --show-error --output "$evidence_dir/post-user-reset-jwks.json" --write-out '%{http_code}' "$user_new_address/.well-known/jwks.json")" == 200 ]] ||
+  fail "could not read the restarted JWKS"
+post_user_jwks_material=$(validated_jwks_material "$evidence_dir/post-user-reset-jwks.json") ||
+  fail "the restarted JWKS is not an exact public P-256 key set"
+[[ "$post_user_jwks_material" != "$pre_user_jwks_material" ]] || fail "daemon restart did not rotate its signing key"
+
+user_login_failure "$evidence_dir/user-legacy-password" user-stale
+user_login_success "$evidence_dir/user-first-password" user-new
+authenticated_get "$evidence_dir/user-new-access-token" /v1/users/current 200 "$evidence_dir/user-new-v1.json"
+jq -e '.data.id == 8 and .data.username == "legacy-user-e2e" and (.data | has("password") | not)' \
+  "$evidence_dir/user-new-v1.json" >/dev/null || fail "authenticated non-administrator identity response is malformed"
+authenticated_get "$evidence_dir/user-new-access-token" /v2/users/events 200 "$evidence_dir/user-new-v2.json"
+jq -e 'type == "array" and length == 1 and .[0].uuid == "00000000-0000-4000-8000-000000000001" and .[0].source_id == "legacy-source" and .[0].name == "legacy-event" and .[0].properties == "{}" and .[0].timestamp == 1787184000000' \
+  "$evidence_dir/user-new-v2.json" >/dev/null || fail "authenticated non-administrator v2 response did not preserve the legacy event"
+phase "local non-administrator reset without role changes, restart, and verifier rotation"
+
 systemctl stop casaos-user-service.service
 [[ "$(systemctl show casaos-user-service.service --property=ActiveState --value)" == inactive ]] ||
   fail "the final daemon did not stop before diagnostic inspection"
@@ -961,12 +1140,14 @@ journalctl --boot --no-pager --output=cat \
   -u casaos-user-service.service \
   -u recasaos-user-bootstrap.service \
   -u recasaos-user-password-reset.service \
+  -u recasaos-user-account-password-reset.service \
   >"$evidence_dir/service-journal"
 chmod 0600 "$evidence_dir/service-journal"
 for secret_file in \
   "$evidence_dir/first-password" \
   "$evidence_dir/second-password" \
   "$evidence_dir/lock-password" \
+  "$evidence_dir/user-first-password" \
   "$evidence_dir/bootstrap-access-token" \
   "$evidence_dir/bootstrap-refresh-token" \
   "$evidence_dir/old-access-token" \
@@ -999,16 +1180,16 @@ phase "credential-safe systemd and application diagnostics"
   ! -L /run/casaos/recasaos-userservice-e2e-stub-state.json ]] ||
   fail "the isolated dependency stub state is missing or unsafe"
 jq -e '
-  .event_type == 3 and
+  .event_type == 4 and
   .routes == {
-    "/.well-known/jwks.json": 3,
-    "/doc/v2/users": 3,
-    "/v1/users": 3,
-    "/v2/users": 3
+    "/.well-known/jwks.json": 4,
+    "/doc/v2/users": 4,
+    "/v1/users": 4,
+    "/v2/users": 4
   }
 ' /run/casaos/recasaos-userservice-e2e-stub-state.json >/dev/null ||
   fail "the daemon did not register every reviewed gateway/message-bus route exactly once per start"
-phase "exact gateway and message-bus registration across all three daemon starts"
+phase "exact gateway and message-bus registration across all four daemon starts"
 
 systemctl stop casaos-message-bus.service
 printf 'UserService Debian 11 systemd 247 lifecycle passed for %s\n' \
