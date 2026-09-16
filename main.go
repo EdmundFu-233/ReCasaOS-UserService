@@ -72,6 +72,9 @@ func run(args []string, stdout, stderr io.Writer, effectiveUID int, getenv func(
 	if len(args) > 0 && args[0] == "reset-admin-password" {
 		return runResetAdminPassword(args[1:], stdout, stderr, effectiveUID, getenv)
 	}
+	if len(args) > 0 && args[0] == "reset-user-password" {
+		return runResetUserPassword(args[1:], stdout, stderr, effectiveUID, getenv)
+	}
 	return runServer(args, stdout, stderr, effectiveUID)
 }
 
@@ -359,6 +362,78 @@ func runResetAdminPassword(args []string, stdout, stderr io.Writer, effectiveUID
 		return err
 	}
 	fmt.Fprintln(stdout, "administrator password reset completed")
+	return nil
+}
+
+const (
+	userUsernameCredentialName    = "recasaos.user.username"
+	userNewPasswordCredentialName = "recasaos.user.new-password"
+)
+
+// runResetUserPassword implements the local-only recovery workflow for one
+// exact existing non-administrator account. Like the administrator reset it
+// accepts no credentials through argv, environment values, HTTP, or logs:
+// the username and replacement password arrive only as systemd credentials,
+// and administrator targets are refused without promotion.
+func runResetUserPassword(args []string, stdout, stderr io.Writer, effectiveUID int, getenv func(string) string) error {
+	flags := flag.NewFlagSet("reset-user-password", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configFlag := flags.String("c", "", "config address")
+	dbFlag := flags.String("db", "", "database directory")
+	sealFlag := flags.String("bootstrap-seal", defaultBootstrapSealPath, "bootstrap seal outside the database directory")
+	lockFlag := flags.String("process-lock", defaultProcessLockPath, "daemon/bootstrap/reset exclusion lock")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("reset-user-password accepts no username or password arguments")
+	}
+	if effectiveUID != 0 {
+		return errors.New("reset-user-password requires effective uid 0")
+	}
+	processLock, err := processlock.Acquire(*lockFlag, uint32(effectiveUID))
+	if err != nil {
+		return err
+	}
+	defer processLock.Close()
+
+	credentialsDirectory := getenv(credentialsDirectoryEnvironment)
+	if credentialsDirectory == "" {
+		return fmt.Errorf("%s is not set; use systemd LoadCredential with %s and %s", credentialsDirectoryEnvironment, userUsernameCredentialName, userNewPasswordCredentialName)
+	}
+	usernameBytes, err := readCredential(credentialsDirectory, userUsernameCredentialName, uint32(effectiveUID))
+	if err != nil {
+		return err
+	}
+	defer erase(usernameBytes)
+	passwordBytes, err := readCredential(credentialsDirectory, userNewPasswordCredentialName, uint32(effectiveUID))
+	if err != nil {
+		return err
+	}
+	defer erase(passwordBytes)
+
+	if *dbFlag == "" {
+		config.InitSetup(*configFlag, _confSample)
+		*dbFlag = config.AppInfo.DBPath
+	}
+	if err := requireSealOutsideDatabase(*dbFlag, *sealFlag); err != nil {
+		return err
+	}
+	db, err := sqlite.GetExistingDb(*dbFlag)
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("access user database pool: %w", err)
+	}
+	defer sqlDB.Close()
+
+	seal := userbootstrap.NewFileSeal(*sealFlag, uint32(effectiveUID))
+	if err := service.ResetUserPassword(context.Background(), db, seal, string(usernameBytes), passwordBytes); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "user password reset completed")
 	return nil
 }
 

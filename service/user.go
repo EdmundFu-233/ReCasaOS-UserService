@@ -31,14 +31,15 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("invalid username or password")
-	ErrPasswordChanged    = errors.New("password changed concurrently")
-	ErrLastAdmin          = errors.New("refuse to delete the last administrator")
-	ErrNotAdministrator   = errors.New("user is not an administrator")
-	ErrUserNotFound       = errors.New("user not found")
-	ErrInvalidUsername    = errors.New("username must be 1-64 characters and contain only letters, numbers, dot, underscore, or hyphen")
-	ErrInvalidResetTarget = errors.New("administrator username credential is invalid")
-	ErrWeakPassword       = errors.New("password must be between 12 and 1024 bytes")
+	ErrInvalidCredentials         = errors.New("invalid username or password")
+	ErrPasswordChanged            = errors.New("password changed concurrently")
+	ErrLastAdmin                  = errors.New("refuse to delete the last administrator")
+	ErrNotAdministrator           = errors.New("user is not an administrator")
+	ErrUserNotFound               = errors.New("user not found")
+	ErrInvalidUsername            = errors.New("username must be 1-64 characters and contain only letters, numbers, dot, underscore, or hyphen")
+	ErrInvalidResetTarget         = errors.New("administrator username credential is invalid")
+	ErrResetTargetIsAdministrator = errors.New("local user reset refuses administrator targets")
+	ErrWeakPassword               = errors.New("password must be between 12 and 1024 bytes")
 )
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -408,6 +409,161 @@ func ResetAdminPassword(ctx context.Context, db *gorm.DB, seal userbootstrap.Sea
 	}
 	committed = true
 	return nil
+}
+
+// ResetUserPassword replaces the verifier of exactly one existing
+// non-administrator account without touching its ID, username, role,
+// profile, or anything else. It mirrors ResetAdminPassword (root-only
+// caller, daemon-exclusion lock, systemd credentials, mode=rw database,
+// initialized marker/seal, BEGIN IMMEDIATE with ID/username/role/verifier
+// CAS) and additionally refuses administrator targets, so a legacy weak
+// account can be recovered after upgrade without promotion and without
+// re-enabling weak verification.
+func ResetUserPassword(ctx context.Context, db *gorm.DB, seal userbootstrap.Seal, username string, plaintext []byte) (err error) {
+	if !validResetUsername(username) {
+		return ErrInvalidResetTarget
+	}
+	if err := ValidateNewPassword(plaintext); err != nil {
+		return err
+	}
+	newHash, err := passwordutil.Hash(plaintext)
+	if err != nil {
+		return fmt.Errorf("hash replacement user password: %w", err)
+	}
+	if seal == nil {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("access user database pool: %w", err)
+	}
+	sealID, sealExists, err := seal.Load()
+	if err != nil {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	hasStateTable, err := bootstrapStateTableExists(ctx, sqlDB)
+	if err != nil {
+		return err
+	}
+	if _, _, _, err := loadUniqueNonAdministrator(ctx, sqlDB, username); err != nil {
+		return err
+	}
+	if !hasStateTable {
+		if sealExists {
+			return userbootstrap.ErrRecoveryRequired
+		}
+		if err := db.AutoMigrate(&model.BootstrapStateDBModel{}); err != nil {
+			return fmt.Errorf("create bootstrap state for legacy user reset: %w", err)
+		}
+	}
+	var existingID string
+	var existingStatus userbootstrap.Status
+	markerErr := sqlDB.QueryRowContext(ctx,
+		`SELECT installation_id, status FROM o_bootstrap_state WHERE id = 1`,
+	).Scan(&existingID, &existingStatus)
+	switch {
+	case errors.Is(markerErr, sql.ErrNoRows):
+		if sealExists {
+			return userbootstrap.ErrRecoveryRequired
+		}
+	case markerErr != nil:
+		return fmt.Errorf("inspect user reset state: %w", markerErr)
+	case existingStatus != userbootstrap.StatusInitialized:
+		return userbootstrap.ErrRecoveryRequired
+	case sealExists && existingID != sealID:
+		return userbootstrap.ErrRecoveryRequired
+	}
+
+	state, err := userbootstrap.ReconcileState(ctx, sqlDB, seal)
+	if err != nil {
+		return err
+	}
+	if state.Status != userbootstrap.StatusInitialized {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	sealID, sealExists, err = seal.Load()
+	if err != nil || !sealExists || sealID != state.InstallationID {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire user reset connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin user reset transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
+	var databaseID string
+	var status userbootstrap.Status
+	if err := conn.QueryRowContext(ctx,
+		`SELECT installation_id, status FROM o_bootstrap_state WHERE id = 1`,
+	).Scan(&databaseID, &status); err != nil || databaseID != state.InstallationID || status != userbootstrap.StatusInitialized {
+		return userbootstrap.ErrRecoveryRequired
+	}
+	userID, role, oldHash, err := loadUniqueNonAdministrator(ctx, conn, username)
+	if err != nil {
+		return err
+	}
+	result, err := conn.ExecContext(ctx,
+		`UPDATE o_users SET password = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND username = ? AND role = ? AND role != 'admin' AND password = ?`,
+		newHash, userID, username, role, oldHash,
+	)
+	if err != nil {
+		return fmt.Errorf("store replacement user password: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read user reset result: %w", err)
+	}
+	if rows != 1 {
+		return ErrPasswordChanged
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit user reset: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// loadUniqueNonAdministrator resolves exactly one existing non-administrator
+// by username. Unknown names, duplicates, and administrator targets are all
+// hard errors that change nothing.
+func loadUniqueNonAdministrator(ctx context.Context, db rowQueryer, username string) (int64, string, string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, role, password FROM o_users WHERE username = ? LIMIT 2`, username)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("inspect local reset target: %w", err)
+	}
+	defer rows.Close()
+	count := 0
+	var userID int64
+	role, oldHash := "", ""
+	for rows.Next() {
+		count++
+		if err := rows.Scan(&userID, &role, &oldHash); err != nil {
+			return 0, "", "", fmt.Errorf("read local reset target: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", "", fmt.Errorf("read local reset target: %w", err)
+	}
+	if count == 0 {
+		return 0, "", "", ErrUserNotFound
+	}
+	if count != 1 {
+		return 0, "", "", ErrInvalidResetTarget
+	}
+	if role == "admin" {
+		return 0, "", "", ErrResetTargetIsAdministrator
+	}
+	return userID, role, oldHash, nil
 }
 
 func bootstrapStateTableExists(ctx context.Context, db *sql.DB) (bool, error) {

@@ -752,3 +752,243 @@ func TestValidationErrorsDoNotContainSubmittedPasswords(t *testing.T) {
 		t.Fatal("error disclosed submitted password")
 	}
 }
+
+func TestLocalUserResetRejectionsLeaveAllIdentityStateUnchanged(t *testing.T) {
+	db, seal := openSecurityTestDatabase(t)
+	if _, err := BootstrapAdmin(context.Background(), db, seal, "admin", []byte("initial-strong-password"), nil); err != nil {
+		t.Fatal(err)
+	}
+	userHash, err := passwordutil.Hash([]byte("ordinary-user-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary := model.UserDBModel{Username: "ordinary", Password: userHash, Role: "user", Email: "ordinary@example.com", Nickname: "Ordinary"}
+	if err := db.Create(&ordinary).Error; err != nil {
+		t.Fatal(err)
+	}
+	var adminBefore, ordinaryBefore model.UserDBModel
+	if err := db.Where("username = ?", "admin").First(&adminBefore).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("username = ?", "ordinary").First(&ordinaryBefore).Error; err != nil {
+		t.Fatal(err)
+	}
+	var markerBefore model.BootstrapStateDBModel
+	if err := db.First(&markerBefore, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	sealIDBefore, exists, err := seal.Load()
+	if err != nil || !exists {
+		t.Fatalf("load seal before rejected resets: exists=%v err=%v", exists, err)
+	}
+	for _, invalid := range []string{"", "line\nbreak", strings.Repeat("x", 257)} {
+		if err := ResetUserPassword(context.Background(), db, seal, invalid, []byte("replacement-strong-password")); !errors.Is(err, ErrInvalidResetTarget) {
+			t.Fatalf("invalid reset target error = %v", err)
+		}
+	}
+	if err := ResetUserPassword(context.Background(), db, seal, "missing", []byte("replacement-strong-password")); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("missing-user reset error = %v", err)
+	}
+	if err := ResetUserPassword(context.Background(), db, seal, "admin", []byte("replacement-strong-password")); !errors.Is(err, ErrResetTargetIsAdministrator) {
+		t.Fatalf("administrator-target reset error = %v", err)
+	}
+	if err := ResetUserPassword(context.Background(), db, seal, "ordinary", []byte("short")); !errors.Is(err, ErrWeakPassword) {
+		t.Fatalf("weak-password reset error = %v", err)
+	}
+	if err := ResetUserPassword(context.Background(), db, nil, "ordinary", []byte("replacement-strong-password")); !errors.Is(err, userbootstrap.ErrRecoveryRequired) {
+		t.Fatalf("nil-seal reset error = %v", err)
+	}
+	mismatchedSeal := userbootstrap.NewFileSeal(filepath.Join(t.TempDir(), "mismatch", "seal"), uint32(os.Geteuid()))
+	if err := mismatchedSeal.Create("123e4567-e89b-42d3-a456-426614174000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUserPassword(context.Background(), db, mismatchedSeal, "ordinary", []byte("replacement-strong-password")); !errors.Is(err, userbootstrap.ErrRecoveryRequired) {
+		t.Fatalf("mismatched-seal reset error = %v", err)
+	}
+	var adminAfter, ordinaryAfter model.UserDBModel
+	if err := db.Where("username = ?", "admin").First(&adminAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("username = ?", "ordinary").First(&ordinaryAfter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !sameUserSecurityState(adminBefore, adminAfter) || !sameUserSecurityState(ordinaryBefore, ordinaryAfter) {
+		t.Fatal("rejected local reset changed a user identity, role, profile, or verifier")
+	}
+	var userCount int64
+	if err := db.Model(&model.UserDBModel{}).Count(&userCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if userCount != 2 {
+		t.Fatalf("rejected local reset changed user count to %d", userCount)
+	}
+	var markerAfter model.BootstrapStateDBModel
+	if err := db.First(&markerAfter, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !sameBootstrapState(markerBefore, markerAfter) {
+		t.Fatal("rejected local reset changed bootstrap marker")
+	}
+	sealIDAfter, stillExists, err := seal.Load()
+	if err != nil || !stillExists || sealIDAfter != sealIDBefore {
+		t.Fatalf("rejected local reset changed seal: exists=%v err=%v", stillExists, err)
+	}
+}
+
+func TestLocalUserResetSuccessPreservesIdentityWithArgon2id(t *testing.T) {
+	db, seal := openSecurityTestDatabase(t)
+	if _, err := BootstrapAdmin(context.Background(), db, seal, "admin", []byte("initial-strong-password"), nil); err != nil {
+		t.Fatal(err)
+	}
+	const legacyHash = "12121b2b7fdedd5ec5777926650d7119"
+	legacy := model.UserDBModel{Username: "legacy", Password: legacyHash, Role: "user", Email: "legacy@example.com", Nickname: "Legacy"}
+	if err := db.Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	userService := NewUserService(db, userbootstrap.State{Status: userbootstrap.StatusInitialized})
+	for _, candidate := range []string{"legacy-password", "wrong-legacy-password"} {
+		if _, err := userService.AuthenticateUser("legacy", []byte(candidate)); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("legacy verifier was evaluated during login: %v", err)
+		}
+	}
+	newPassword := []byte("replacement-strong-password")
+	if err := ResetUserPassword(context.Background(), db, seal, "legacy", newPassword); err != nil {
+		t.Fatal(err)
+	}
+	var stored model.UserDBModel
+	if err := db.Where("username = ?", "legacy").First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Id != legacy.Id || stored.Username != "legacy" || stored.Role != "user" ||
+		stored.Email != "legacy@example.com" || stored.Nickname != "Legacy" {
+		t.Fatalf("reset changed identity beyond the verifier: %+v", stored)
+	}
+	if stored.Password == legacyHash {
+		t.Fatal("reset left the legacy verifier in place")
+	}
+	if _, err := userService.AuthenticateUser("legacy", newPassword); err != nil {
+		t.Fatalf("reset password does not authenticate: %v", err)
+	}
+	if _, err := userService.AuthenticateUser("legacy", []byte("legacy-password")); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old verifier still authenticates: %v", err)
+	}
+	var userCount int64
+	if err := db.Model(&model.UserDBModel{}).Count(&userCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if userCount != 2 {
+		t.Fatalf("successful reset changed user count to %d", userCount)
+	}
+}
+
+func TestLocalUserResetCASFailureRollsBack(t *testing.T) {
+	db, seal := openSecurityTestDatabase(t)
+	if _, err := BootstrapAdmin(context.Background(), db, seal, "admin", []byte("initial-strong-password"), nil); err != nil {
+		t.Fatal(err)
+	}
+	userHash, err := passwordutil.Hash([]byte("ordinary-user-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary := model.UserDBModel{Username: "ordinary", Password: userHash, Role: "user"}
+	if err := db.Create(&ordinary).Error; err != nil {
+		t.Fatal(err)
+	}
+	var before model.UserDBModel
+	if err := db.Where("username = ?", "ordinary").First(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TRIGGER ignore_password_reset
+		BEFORE UPDATE OF password ON o_users
+		BEGIN SELECT RAISE(IGNORE); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUserPassword(context.Background(), db, seal, "ordinary", []byte("replacement-strong-password")); !errors.Is(err, ErrPasswordChanged) {
+		t.Fatalf("CAS-zero reset error = %v", err)
+	}
+	var after model.UserDBModel
+	if err := db.Where("username = ?", "ordinary").First(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !sameUserSecurityState(before, after) {
+		t.Fatal("CAS-zero reset changed user state")
+	}
+}
+
+func TestLocalUserResetValidatesUniqueNonAdministrator(t *testing.T) {
+	const legacyHash = "12121b2b7fdedd5ec5777926650d7119"
+	tests := []struct {
+		name       string
+		users      []model.UserDBModel
+		target     string
+		want       error
+		duplicates bool
+	}{
+		{
+			name:   "unknown target",
+			users:  []model.UserDBModel{{Username: "ordinary", Password: legacyHash, Role: "user"}},
+			target: "typo",
+			want:   ErrUserNotFound,
+		},
+		{
+			name:   "administrator target refused",
+			users:  []model.UserDBModel{{Username: "admin", Password: legacyHash, Role: "admin"}},
+			target: "admin",
+			want:   ErrResetTargetIsAdministrator,
+		},
+		{
+			name: "duplicate username",
+			users: []model.UserDBModel{
+				{Username: "duplicate", Password: legacyHash, Role: "user"},
+				{Username: "duplicate", Password: legacyHash, Role: "user"},
+			},
+			target:     "duplicate",
+			want:       ErrInvalidResetTarget,
+			duplicates: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, seal := openSecurityTestDatabase(t)
+			if test.duplicates {
+				if err := db.Migrator().DropIndex(&model.UserDBModel{}, "idx_o_users_username"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for index := range test.users {
+				if err := db.Create(&test.users[index]).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Migrator().DropTable(&model.BootstrapStateDBModel{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ResetUserPassword(context.Background(), db, seal, test.target, []byte("replacement-strong-password")); !errors.Is(err, test.want) {
+				t.Fatalf("user reset error = %v, want %v", err, test.want)
+			}
+			if db.Migrator().HasTable(&model.BootstrapStateDBModel{}) {
+				t.Fatal("rejected user reset created bootstrap state schema")
+			}
+			if _, exists, err := seal.Load(); err != nil || exists {
+				t.Fatalf("rejected user reset created a seal: exists=%v err=%v", exists, err)
+			}
+			var count int64
+			if err := db.Model(&model.UserDBModel{}).Count(&count).Error; err != nil {
+				t.Fatal(err)
+			}
+			if count != int64(len(test.users)) {
+				t.Fatalf("rejected user reset changed user count to %d", count)
+			}
+			for _, original := range test.users {
+				var stored model.UserDBModel
+				if err := db.First(&stored, original.Id).Error; err != nil {
+					t.Fatal(err)
+				}
+				if !sameUserSecurityState(original, stored) {
+					t.Fatal("rejected user reset changed an existing user")
+				}
+			}
+		})
+	}
+}

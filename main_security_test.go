@@ -242,3 +242,27 @@ func privateCredentialDirectory(t *testing.T) string {
 	}
 	return directory
 }
+
+func TestUserPasswordResetCLIRejectsNonRootAndPasswordArgumentsWithoutDisclosure(t *testing.T) {
+	secret := "never-print-this-user-reset-password"
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := run([]string{"reset-user-password", "-password=" + secret}, stdout, stderr, 0, func(string) string {
+		t.Fatal("environment should not be read after argument parse failure")
+		return ""
+	})
+	if err == nil {
+		t.Fatal("reset-user-password accepted a password argument")
+	}
+	if strings.Contains(err.Error()+stdout.String()+stderr.String(), secret) {
+		t.Fatal("reset argument error disclosed password value")
+	}
+
+	err = run([]string{"reset-user-password"}, stdout, stderr, 1, func(string) string {
+		t.Fatal("non-root reset should fail before reading credentials")
+		return ""
+	})
+	if err == nil || !strings.Contains(err.Error(), "effective uid 0") {
+		t.Fatalf("non-root reset error = %v", err)
+	}
+}
