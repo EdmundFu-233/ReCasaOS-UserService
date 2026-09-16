@@ -1,5 +1,10 @@
 [common]
 RuntimePath=/var/run/casaos
+# Comma-separated exact origins allowed to use browser credentials against
+# the API (for example: https://console.example). Empty (the default) means
+# same-origin only: no CORS headers are emitted. A wildcard is rejected at
+# startup because credentialed CORS with a wildcard is contradictory.
+CORSOrigins=
 
 [app]
 LogPath = /var/log/casaos
