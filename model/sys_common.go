@@ -2,6 +2,10 @@ package model
 
 type CommonModel struct {
 	RuntimePath string
+	// CORSOrigins is a comma-separated list of exact HTTP(S) origins allowed
+	// to use browser credentials. Empty means same-origin only: no CORS
+	// headers are emitted and no preflight is answered.
+	CORSOrigins string
 }
 
 type APPModel struct {
