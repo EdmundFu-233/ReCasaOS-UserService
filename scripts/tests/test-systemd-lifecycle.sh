@@ -1180,7 +1180,7 @@ phase "credential-safe systemd and application diagnostics"
   ! -L /run/casaos/recasaos-userservice-e2e-stub-state.json ]] ||
   fail "the isolated dependency stub state is missing or unsafe"
 jq -e '
-  .event_type == 3 and
+  .event_type == 4 and
   .routes == {
     "/.well-known/jwks.json": 4,
     "/doc/v2/users": 4,
