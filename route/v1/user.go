@@ -654,6 +654,7 @@ func PostUserRefreshToken(ctx echo.Context) error {
 		users.LogCredentialEvent(0, model2.CredentialEventRefreshFailure, false, "refresh", "")
 		return refreshUnauthorized(ctx)
 	case err != nil:
+		logger.Error("issue refreshed tokens", zap.Error(err))
 		return ctx.JSON(http.StatusInternalServerError, model.Result{
 			Success: common_err.SERVICE_ERROR,
 			Message: common_err.GetMsg(common_err.SERVICE_ERROR),

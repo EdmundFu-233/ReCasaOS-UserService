@@ -95,10 +95,16 @@ func (u *userService) IssueRefreshedTokens(presented string, now time.Time) (Iss
 		if errors.Is(err, ErrRefreshSessionReused) {
 			return IssuedSession{}, ErrRefreshSessionReused
 		}
-		if _, _, recordErr := u.RecordLoginFailure(lockKey, now); recordErr != nil {
-			return IssuedSession{}, recordErr
+		if errors.Is(err, ErrInvalidRefreshSession) {
+			if _, _, recordErr := u.RecordLoginFailure(lockKey, now); recordErr != nil {
+				return IssuedSession{}, recordErr
+			}
+			return IssuedSession{}, ErrInvalidRefreshSession
 		}
-		return IssuedSession{}, ErrInvalidRefreshSession
+		// A containment or store failure must not degrade to an
+		// indistinguishable rejection: the handler reports it as a server
+		// error so the broken invariant gets operator attention.
+		return IssuedSession{}, err
 	}
 	u.RecordLoginSuccess(lockKey)
 	u.PruneAuthState(now)

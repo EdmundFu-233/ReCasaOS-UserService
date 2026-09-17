@@ -50,8 +50,8 @@ type AuthenticatedSession struct {
 	Expires  time.Time
 }
 
-// LoginAttemptKey namespaces one failure counter. Usernames are lowercased by
-// the caller so "Admin" and "admin" share one budget.
+// LoginAttemptKey namespaces one failure counter. Keys use the exact
+// presented username so distinct accounts never share a budget.
 func LoginAttemptKey(namespace, value string) string {
 	return namespace + ":" + value
 }
@@ -412,6 +412,10 @@ func (u *userService) PruneAuthState(now time.Time) {
 	_ = u.db.Exec(`DELETE FROM o_refresh_sessions WHERE id NOT IN (
 		SELECT id FROM o_refresh_sessions AS kept WHERE kept.user_id = o_refresh_sessions.user_id
 		ORDER BY kept.issued_at DESC, kept.id DESC LIMIT ?)`, refreshSessionCap).Error
+	// The denylist cap is per user: evicting another user's live revocation
+	// would resurrect their logged-out token. A user flooding their own
+	// revocations only affects themselves.
 	_ = u.db.Exec(`DELETE FROM o_revoked_access_tokens WHERE jti NOT IN (
-		SELECT jti FROM o_revoked_access_tokens AS kept ORDER BY kept.expires_at DESC LIMIT ?)`, revokedAccessCap).Error
+		SELECT jti FROM o_revoked_access_tokens AS kept WHERE kept.user_id = o_revoked_access_tokens.user_id
+		ORDER BY kept.expires_at DESC LIMIT ?)`, revokedAccessCap).Error
 }

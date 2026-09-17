@@ -8,7 +8,7 @@ import "time"
 type RefreshSessionDBModel struct {
 	ID           string     `gorm:"column:id;primaryKey" json:"id"`
 	UserID       int        `gorm:"column:user_id;index:idx_refresh_sessions_user" json:"user_id"`
-	TokenSHA256  string     `gorm:"column:token_sha256" json:"-"`
+	TokenSHA256  string     `gorm:"column:token_sha256;uniqueIndex:idx_refresh_sessions_token" json:"-"`
 	IssuedAt     time.Time  `gorm:"column:issued_at" json:"issued_at"`
 	ExpiresAt    time.Time  `gorm:"column:expires_at" json:"expires_at"`
 	UsedAt       *time.Time `gorm:"column:used_at" json:"used_at,omitempty"`

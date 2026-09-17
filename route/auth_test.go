@@ -284,10 +284,33 @@ func TestAccessTokenMiddlewareFailsClosedWithoutSessionStore(t *testing.T) {
 	}
 }
 
+func TestAccessTokenMiddlewareFailsClosedOnDenylistError(t *testing.T) {
+	t.Parallel()
+
+	privateKey := mustTestAuthenticationKey(t)
+	accessToken := mustSessionAccessToken(t, privateKey, "admin", 17, 0, "denylist-error-jti")
+	request := httptest.NewRequest(http.MethodGet, "http://device.test/private", nil)
+	request.Header.Set(echo.HeaderAuthorization, accessToken)
+	response := serveAuthenticatedTestRequest(t, privateKey, denylistErrorStore{fakeAccessSessionStore: validAccessSessionStore()}, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+// denylistErrorStore answers version checks normally but fails every
+// revocation lookup, pinning the fail-closed branch of the middleware.
+type denylistErrorStore struct {
+	*fakeAccessSessionStore
+}
+
+func (denylistErrorStore) IsAccessTokenRevoked(string) (bool, error) {
+	return false, errors.New("injected denylist failure")
+}
+
 func serveAuthenticatedTestRequest(
 	t *testing.T,
 	privateKey *ecdsa.PrivateKey,
-	store *fakeAccessSessionStore,
+	store accessSessionValidator,
 	request *http.Request,
 ) *httptest.ResponseRecorder {
 	t.Helper()

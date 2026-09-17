@@ -325,3 +325,38 @@ func TestPruneAuthStateRemovesOnlyExpiredRows(t *testing.T) {
 		t.Fatalf("live revocation revoked=%v err=%v, want retained", revoked, err)
 	}
 }
+
+func TestPruneAuthStateEnforcesCaps(t *testing.T) {
+	t.Parallel()
+
+	users := openSessionStoreTestUsers(t)
+	now := time.Now()
+	const sessions = 260
+	for index := 0; index < sessions; index++ {
+		name := "session-cap-" + strconv.Itoa(index)
+		if err := users.CreateRefreshSession(1, "sha-"+name, now, now.Add(time.Hour), name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	users.PruneAuthState(now)
+	remaining, err := countRefreshSessions(t, users, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 256 {
+		t.Fatalf("refresh sessions after prune = %d, want 256", remaining)
+	}
+}
+
+func countRefreshSessions(t *testing.T, users UserService, userID int) (int64, error) {
+	t.Helper()
+	store, ok := users.(*userService)
+	if !ok {
+		t.Fatal("test user service has an unexpected implementation")
+	}
+	var count int64
+	if err := store.db.Model(&model.RefreshSessionDBModel{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
