@@ -183,3 +183,120 @@ func TestNewUsesBoundedRetryDelay(t *testing.T) {
 		t.Fatalf("retry delay was not bounded: %v", elapsed)
 	}
 }
+
+func TestClientRejectsNonLoopbackManagementAddress(t *testing.T) {
+	for _, address := range []string{
+		"http://example.com:8080",
+		"http://10.0.0.1:8080",
+		"https://127.0.0.1:8080",
+		"http://127.0.0.1",
+		"http://user@127.0.0.1:8080",
+		"http://127.0.0.1:8080/v1",
+	} {
+		if _, err := New(plantRuntime(t, address, testServiceToken)); err == nil {
+			t.Fatalf("management address %q was accepted", address)
+		}
+	}
+}
+
+func TestClientDoesNotForwardCredentialOnRedirect(t *testing.T) {
+	var redirectedRequests atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedRequests.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, target.URL+"/v1/gateway/routes", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	client, err := New(plantRuntime(t, redirector.URL, testServiceToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CreateRoute(&model.Route{Path: "/v1/file", Target: "http://127.0.0.1:8080"}); err == nil {
+		t.Fatal("redirected management request unexpectedly succeeded")
+	}
+	if redirectedRequests.Load() != 0 {
+		t.Fatalf("service credential reached the redirect target %d times", redirectedRequests.Load())
+	}
+}
+
+func TestClientPicksUpRotatedToken(t *testing.T) {
+	var accepted atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Header.Get("Authorization") == "Bearer rotated-token" {
+			accepted.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	runtimePath := plantRuntime(t, server.URL, testServiceToken)
+	client, err := New(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CreateRoute(&model.Route{Path: "/v1/file", Target: "http://127.0.0.1:8080"}); err == nil {
+		t.Fatal("stale token unexpectedly accepted")
+	}
+	if err := os.WriteFile(filepath.Join(runtimePath, ServiceTokenFilename), []byte("rotated-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CreateRoute(&model.Route{Path: "/v1/file", Target: "http://127.0.0.1:8080"}); err != nil {
+		t.Fatalf("rotated token was not picked up: %v", err)
+	}
+	if accepted.Load() != 1 {
+		t.Fatalf("rotated token accepted %d times, want 1", accepted.Load())
+	}
+}
+
+func TestClientRejectsSymlinkedAndOversizedToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	runtimePath := plantRuntime(t, server.URL, "")
+	realToken := filepath.Join(runtimePath, "real.token")
+	if err := os.WriteFile(realToken, []byte(testServiceToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(runtimePath, ServiceTokenFilename)
+	if err := os.Symlink(realToken, tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CreateRoute(&model.Route{Path: "/v1/file", Target: "http://127.0.0.1:8080"}); err == nil {
+		t.Fatal("symlinked service token was accepted")
+	}
+
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, make([]byte, maxCredentialFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CreateRoute(&model.Route{Path: "/v1/file", Target: "http://127.0.0.1:8080"}); err == nil {
+		t.Fatal("oversized service token was accepted")
+	}
+}

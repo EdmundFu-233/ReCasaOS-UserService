@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +27,8 @@ const (
 	// into its runtime directory on every start.
 	ServiceTokenFilename = "gateway.token"
 
-	maxResponseBytes = 64 << 10
+	maxResponseBytes       = 64 << 10
+	maxCredentialFileBytes = 1 << 10
 )
 
 var (
@@ -52,7 +55,15 @@ func New(runtimePath string) (*Client, error) {
 	}
 	client := &Client{
 		runtimePath: runtimePath,
-		httpClient:  &http.Client{Timeout: requestTimeout},
+		httpClient: &http.Client{
+			Timeout: requestTimeout,
+			// A management redirect must never forward the service credential
+			// to another listener; the caller sees the redirect response and
+			// fails closed.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 	address, err := client.waitForAddress()
 	if err != nil {
@@ -75,28 +86,77 @@ func (c *Client) waitForAddress() (string, error) {
 	return c.address()
 }
 
+// readBoundedFile reads one owner-controlled runtime file with a size bound
+// and symlink refusal. The file is opened and re-checked against its lstat
+// identity so a replacement between the two steps fails closed.
+func (c *Client) readBoundedFile(name string, limit int64) (string, error) {
+	path := filepath.Join(c.runtimePath, name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", name)
+	}
+	if info.Size() > limit {
+		return "", fmt.Errorf("%s exceeds %d bytes", name, limit)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !os.SameFile(info, opened) {
+		return "", fmt.Errorf("%s changed while opening", name)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(raw)) > limit {
+		return "", fmt.Errorf("%s exceeds %d bytes", name, limit)
+	}
+	value := strings.TrimSpace(string(raw))
+	if strings.IndexByte(value, 0) >= 0 {
+		return "", fmt.Errorf("%s contains a NUL byte", name)
+	}
+	return value, nil
+}
+
 func (c *Client) address() (string, error) {
-	raw, err := os.ReadFile(filepath.Join(c.runtimePath, external.ManagementURLFilename))
+	value, err := c.readBoundedFile(external.ManagementURLFilename, maxCredentialFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("read gateway management address: %w", err)
 	}
-	address := strings.TrimSpace(string(raw))
-	if address == "" {
-		return "", errors.New("gateway management address is empty")
+	parsed, err := url.Parse(value)
+	if err != nil || parsed == nil || parsed.Scheme != "http" || parsed.User != nil ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("gateway management address is not a plain http loopback URL")
 	}
-	return address, nil
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil || port == "" {
+		return "", errors.New("gateway management address must include an explicit port")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return "", errors.New("gateway management address must be a loopback IP")
+	}
+	return value, nil
 }
 
 func (c *Client) serviceToken() (string, error) {
-	raw, err := os.ReadFile(filepath.Join(c.runtimePath, ServiceTokenFilename))
+	value, err := c.readBoundedFile(ServiceTokenFilename, maxCredentialFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("read gateway service token: %w", err)
 	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
+	if value == "" {
 		return "", errors.New("gateway service token is empty")
 	}
-	return token, nil
+	return value, nil
 }
 
 func (c *Client) ping(address string) error {
@@ -104,7 +164,12 @@ func (c *Client) ping(address string) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: pingTimeout}
+	client := &http.Client{
+		Timeout: pingTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("ping gateway management service: %w", err)
