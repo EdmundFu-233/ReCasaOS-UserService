@@ -3,6 +3,7 @@ package service
 import (
 	"github.com/EdmundFu-233/ReCasaOS-UserService/codegen/message_bus"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/gatewayclient"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
 	"github.com/IceWhaleTech/CasaOS-Common/external"
 	"gorm.io/gorm"
@@ -19,7 +20,7 @@ type Repository interface {
 
 func NewService(db *gorm.DB, RuntimePath string, initializationState userbootstrap.State) Repository {
 
-	gatewayManagement, err := external.NewManagementService(RuntimePath)
+	gatewayManagement, err := gatewayclient.New(RuntimePath)
 	if err != nil {
 		panic(err)
 	}
