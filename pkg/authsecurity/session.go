@@ -135,7 +135,8 @@ func validateSessionToken(
 	)
 	if err != nil || parsed == nil || !parsed.Valid || parsed.Claims != claims ||
 		claims.Issuer != issuer || claims.ID == "" || claims.UserID < 1 ||
-		claims.Username == "" || claims.TokenVersion < 0 ||
+		claims.Username == "" || claims.Subject != claims.Username ||
+		claims.TokenVersion < 0 ||
 		claims.ExpiresAt == nil || claims.IssuedAt == nil || claims.NotBefore == nil {
 		return nil, ErrInvalidSessionToken
 	}

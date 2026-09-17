@@ -107,6 +107,26 @@ Bearer scheme is immutably pinned. Until then, the raw-header compatibility is
 an explicit release hold tracked by Issue #2, not a general token transport
 mechanism. Tokens must never be placed in URLs.
 
+## Session lifecycle
+
+Access and refresh tokens carry a unique identifier (`jti`) and the user's
+credential generation (`token_version`) alongside the existing identity
+fields; older tokens without an identifier fail closed. Refresh sessions
+are tracked by token digest (never the raw token) and rotated atomically:
+replaying a consumed refresh token revokes the whole session family.
+
+- Login is rate-limited per username (five consecutive failures lock the
+  key for fifteen minutes with `Retry-After`) behind a process-global
+  backstop; refresh has its own per-user and global budgets.
+- Password change, both root resets, logout-all, and account deletion
+  retire refresh sessions and advance the credential generation, which the
+  middleware enforces on every request without waiting for expiry.
+- Single-session logout retires the refresh row and records the access
+  identifier in a pruned denylist.
+- Credential lifecycle operations append secret-free audit events
+  (`o_credential_events`); callers read their own events, administrators
+  may read all.
+
 ## Debian 11 systemd qualification
 
 The required `Go 1.26.6` CI job also boots a checksum-pinned Debian 11 image

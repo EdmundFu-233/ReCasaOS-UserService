@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/common"
@@ -24,8 +23,18 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
+)
+
+// loginLimiter and refreshLimiter are process-global backstops against
+// credential-endpoint fan-out. Per-username and per-user budgets in the
+// session store carry the precise policy; these limiters bound aggregate
+// CPU (Argon2) and database pressure.
+var (
+	loginLimiter   = rate.NewLimiter(rate.Every(time.Minute), 20)
+	refreshLimiter = rate.NewLimiter(rate.Every(time.Minute), 60)
 )
 
 // @Summary register user
@@ -56,6 +65,9 @@ var customConfigKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63
 func PostUserLogin(ctx echo.Context) error {
 	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
 	ctx.Response().Header().Set("Pragma", "no-cache")
+	if !loginLimiter.Allow() {
+		return loginRateLimited(ctx, time.Minute)
+	}
 
 	requestBody := http.MaxBytesReader(ctx.Response(), ctx.Request().Body, maxLoginRequestBodyBytes)
 	decoder := json2.NewDecoder(requestBody)
@@ -85,13 +97,19 @@ func PostUserLogin(ctx echo.Context) error {
 	}
 	users := service.MyService.User()
 	now := time.Now()
-	attemptKey := service.LoginAttemptKey("login", strings.ToLower(username))
+	attemptKey := service.LoginAttemptKey("login", username)
 	if locked, retryAfter := users.CheckLoginLockout(attemptKey, now); locked {
 		return loginRateLimited(ctx, retryAfter)
 	}
 	user, err := users.AuthenticateUser(username, []byte(password))
 	if errors.Is(err, service.ErrInvalidCredentials) {
-		if locked, retryAfter := users.RecordLoginFailure(attemptKey, now); locked {
+		locked, retryAfter, recordErr := users.RecordLoginFailure(attemptKey, now)
+		if recordErr != nil {
+			logger.Error("record login failure", zap.Error(recordErr))
+			return ctx.JSON(http.StatusInternalServerError,
+				model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
+		}
+		if locked {
 			users.LogCredentialEvent(0, model2.CredentialEventLoginLockout, false, "login", "")
 			return loginRateLimited(ctx, retryAfter)
 		}
@@ -597,6 +615,14 @@ func legacyImageEndpointGone(ctx echo.Context) error {
 func PostUserRefreshToken(ctx echo.Context) error {
 	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
 	ctx.Response().Header().Set("Pragma", "no-cache")
+	if !refreshLimiter.Allow() {
+		ctx.Response().Header().Set("Retry-After", "60")
+		return ctx.JSON(common_err.TOO_MANY_REQUEST,
+			model.Result{
+				Success: common_err.TOO_MANY_LOGIN_REQUESTS,
+				Message: common_err.GetMsg(common_err.TOO_MANY_LOGIN_REQUESTS),
+			})
+	}
 
 	requestBody := http.MaxBytesReader(ctx.Response(), ctx.Request().Body, maxRefreshRequestBodyBytes)
 	decoder := json2.NewDecoder(requestBody)
@@ -617,6 +643,13 @@ func PostUserRefreshToken(ctx echo.Context) error {
 	case errors.Is(err, service.ErrRefreshSessionReused):
 		users.LogCredentialEvent(0, model2.CredentialEventRefreshReuse, false, "refresh", "")
 		return refreshUnauthorized(ctx)
+	case errors.Is(err, service.ErrRateLimitLocked):
+		ctx.Response().Header().Set("Retry-After", "60")
+		return ctx.JSON(common_err.TOO_MANY_REQUEST,
+			model.Result{
+				Success: common_err.TOO_MANY_LOGIN_REQUESTS,
+				Message: common_err.GetMsg(common_err.TOO_MANY_LOGIN_REQUESTS),
+			})
 	case errors.Is(err, service.ErrInvalidRefreshSession):
 		users.LogCredentialEvent(0, model2.CredentialEventRefreshFailure, false, "refresh", "")
 		return refreshUnauthorized(ctx)

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,11 +32,11 @@ func (fake *fakeAccessSessionStore) GetUserTokenVersion(userID int) (string, int
 	return fake.username, fake.version, true
 }
 
-func (fake *fakeAccessSessionStore) IsAccessTokenRevoked(tokenID string) bool {
+func (fake *fakeAccessSessionStore) IsAccessTokenRevoked(tokenID string) (bool, error) {
 	if fake == nil {
-		return false
+		return false, errors.New("session store is unavailable")
 	}
-	return fake.revoked[tokenID]
+	return fake.revoked[tokenID], nil
 }
 
 func validAccessSessionStore() *fakeAccessSessionStore {

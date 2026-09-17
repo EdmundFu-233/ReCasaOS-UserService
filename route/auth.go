@@ -25,7 +25,7 @@ var errInvalidAuthorizationHeader = errors.New("invalid authorization header")
 // the access token to expire.
 type accessSessionValidator interface {
 	GetUserTokenVersion(userID int) (string, int, bool)
-	IsAccessTokenRevoked(tokenID string) bool
+	IsAccessTokenRevoked(tokenID string) (bool, error)
 }
 
 func userAccessTokenMiddleware() echo.MiddlewareFunc {
@@ -68,7 +68,8 @@ func accessTokenMiddleware(
 			if !exists || username != claims.Username || version != claims.TokenVersion {
 				return echo.ErrUnauthorized
 			}
-			if sessions.IsAccessTokenRevoked(claims.ID) {
+			revoked, err := sessions.IsAccessTokenRevoked(claims.ID)
+			if err != nil || revoked {
 				return echo.ErrUnauthorized
 			}
 

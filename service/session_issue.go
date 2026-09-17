@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/authsecurity"
@@ -32,7 +33,12 @@ func (u *userService) IssueLoginSession(userID int, now time.Time) (IssuedSessio
 	if err := u.db.Where("id = ?", userID).First(&user).Error; err != nil {
 		return IssuedSession{}, fmt.Errorf("load user for session issuance: %w", err)
 	}
-	return u.issueSessionPair(user, now)
+	issued, err := u.issueSessionPair(user, now)
+	if err != nil {
+		return IssuedSession{}, err
+	}
+	u.PruneAuthState(now)
+	return issued, nil
 }
 
 // IssueRefreshedTokens validates one refresh token, rotates its session, and
@@ -49,11 +55,21 @@ func (u *userService) IssueRefreshedTokens(presented string, now time.Time) (Iss
 	if err != nil {
 		return IssuedSession{}, ErrInvalidRefreshSession
 	}
+	lockKey := LoginAttemptKey("refresh", strconv.Itoa(claims.UserID))
+	if locked, _ := u.CheckLoginLockout(lockKey, now); locked {
+		return IssuedSession{}, ErrRateLimitLocked
+	}
 	var user model.UserDBModel
 	if err := u.db.Where("id = ?", claims.UserID).First(&user).Error; err != nil {
+		if _, _, recordErr := u.RecordLoginFailure(lockKey, now); recordErr != nil {
+			return IssuedSession{}, recordErr
+		}
 		return IssuedSession{}, ErrInvalidRefreshSession
 	}
 	if user.Username != claims.Username || user.TokenVersion != claims.TokenVersion {
+		if _, _, recordErr := u.RecordLoginFailure(lockKey, now); recordErr != nil {
+			return IssuedSession{}, recordErr
+		}
 		return IssuedSession{}, ErrInvalidRefreshSession
 	}
 	replacementID, err := authsecurity.NewTokenID()
@@ -79,8 +95,13 @@ func (u *userService) IssueRefreshedTokens(presented string, now time.Time) (Iss
 		if errors.Is(err, ErrRefreshSessionReused) {
 			return IssuedSession{}, ErrRefreshSessionReused
 		}
+		if _, _, recordErr := u.RecordLoginFailure(lockKey, now); recordErr != nil {
+			return IssuedSession{}, recordErr
+		}
 		return IssuedSession{}, ErrInvalidRefreshSession
 	}
+	u.RecordLoginSuccess(lockKey)
+	u.PruneAuthState(now)
 	return IssuedSession{
 		User:         user,
 		SessionID:    replacementID,

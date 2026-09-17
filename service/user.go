@@ -74,9 +74,9 @@ type UserService interface {
 	BumpTokenVersion(userID int) (int, error)
 	GetUserTokenVersion(userID int) (string, int, bool)
 	RevokeAccessToken(tokenID string, userID int, expiresAt time.Time) error
-	IsAccessTokenRevoked(tokenID string) bool
+	IsAccessTokenRevoked(tokenID string) (bool, error)
 	CheckLoginLockout(key string, now time.Time) (bool, time.Duration)
-	RecordLoginFailure(key string, now time.Time) (bool, time.Duration)
+	RecordLoginFailure(key string, now time.Time) (bool, time.Duration, error)
 	RecordLoginSuccess(key string)
 	LogCredentialEvent(actorUserID int, eventType string, success bool, source, detail string)
 	ListCredentialEvents(actorUserID, limit int) []model.CredentialEventDBModel
@@ -160,7 +160,7 @@ func (u *userService) GetAllUserName() (list []model.UserDBModel) {
 }
 
 func (u *userService) UpdateUser(m model.UserDBModel) {
-	u.db.Model(&m).Omit("password", "role").Updates(&m)
+	u.db.Model(&m).Omit("password", "role", "token_version").Updates(&m)
 }
 
 func (u *userService) AuthenticateUser(username string, plaintext []byte) (model.UserDBModel, error) {
@@ -458,14 +458,20 @@ func ResetAdminPassword(ctx context.Context, db *gorm.DB, seal userbootstrap.Sea
 	if rows != 1 {
 		return ErrPasswordChanged
 	}
+	if _, err := conn.ExecContext(ctx, `UPDATE o_users SET token_version = token_version + 1 WHERE id = ?`, userID); err != nil {
+		if ignoreMissingAuthTable(err) != nil {
+			return fmt.Errorf("advance token version on administrator reset: %w", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM o_refresh_sessions WHERE user_id = ?`, userID); err != nil {
+		if ignoreMissingAuthTable(err) != nil {
+			return fmt.Errorf("revoke sessions on administrator reset: %w", err)
+		}
+	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return fmt.Errorf("commit administrator reset: %w", err)
 	}
 	committed = true
-	// Retire sessions minted under the replaced verifier. Best-effort on
-	// legacy databases: a missing session table must not fail the reset.
-	_, _ = conn.ExecContext(context.Background(), `UPDATE o_users SET token_version = token_version + 1 WHERE id = ?`, userID)
-	_, _ = conn.ExecContext(context.Background(), `DELETE FROM o_refresh_sessions WHERE user_id = ?`, userID)
 	_ = ignoreMissingAuthTable(db.Create(&model.CredentialEventDBModel{
 		OccurredAt:  time.Now(),
 		ActorUserID: int(userID),
@@ -591,14 +597,20 @@ func ResetUserPassword(ctx context.Context, db *gorm.DB, seal userbootstrap.Seal
 	if rows != 1 {
 		return ErrPasswordChanged
 	}
+	if _, err := conn.ExecContext(ctx, `UPDATE o_users SET token_version = token_version + 1 WHERE id = ?`, userID); err != nil {
+		if ignoreMissingAuthTable(err) != nil {
+			return fmt.Errorf("advance token version on user reset: %w", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM o_refresh_sessions WHERE user_id = ?`, userID); err != nil {
+		if ignoreMissingAuthTable(err) != nil {
+			return fmt.Errorf("revoke sessions on user reset: %w", err)
+		}
+	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return fmt.Errorf("commit user reset: %w", err)
 	}
 	committed = true
-	// Retire sessions minted under the replaced verifier. Best-effort on
-	// legacy databases: a missing session table must not fail the reset.
-	_, _ = conn.ExecContext(context.Background(), `UPDATE o_users SET token_version = token_version + 1 WHERE id = ?`, userID)
-	_, _ = conn.ExecContext(context.Background(), `DELETE FROM o_refresh_sessions WHERE user_id = ?`, userID)
 	_ = ignoreMissingAuthTable(db.Create(&model.CredentialEventDBModel{
 		OccurredAt:  time.Now(),
 		ActorUserID: int(userID),

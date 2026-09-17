@@ -19,6 +19,7 @@ import (
 	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 func TestLegacyImageHandlersFailClosedWithoutTouchingPaths(t *testing.T) {
@@ -89,12 +90,13 @@ func openSessionTestUsers(t *testing.T) *sessionTestUsers {
 	if created.Id < 1 {
 		t.Fatal("test user has no id")
 	}
-	return &sessionTestUsers{UserService: users, userID: created.Id}
+	return &sessionTestUsers{UserService: users, userID: created.Id, db: db}
 }
 
 type sessionTestUsers struct {
 	service.UserService
 	userID int
+	db     *gorm.DB
 }
 
 func TestIssueRefreshedTokensRejectsDeletedOrRenamedUsers(t *testing.T) {
@@ -370,6 +372,10 @@ func tokenSessionID(t *testing.T, token string) string {
 }
 
 func authenticatedSessionHandler(t *testing.T, users *sessionTestUsers, handler echo.HandlerFunc, method, target, body, token string) *httptest.ResponseRecorder {
+	return authenticatedSessionHandlerAs(t, users, users.userID, handler, method, target, body, token)
+}
+
+func authenticatedSessionHandlerAs(t *testing.T, users *sessionTestUsers, userID int, handler echo.HandlerFunc, method, target, body, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	originalRepository := service.MyService
 	service.MyService = profileRepositoryStub{users: users}
@@ -382,7 +388,7 @@ func authenticatedSessionHandler(t *testing.T, users *sessionTestUsers, handler 
 	if token != "" {
 		context.Set(service.SessionContextKey, service.AuthenticatedSession{
 			Request:  request,
-			UserID:   users.userID,
+			UserID:   userID,
 			Username: "admin",
 			TokenID:  tokenSessionID(t, token),
 			Expires:  time.Now().Add(3 * time.Hour),
@@ -417,6 +423,36 @@ func TestLoginRejectsMalformedOrOversizedBodiesWithoutReflectingSecrets(t *testi
 			strings.Contains(recorder.Body.String(), secret) {
 			t.Fatalf("unsafe login response headers/body: %#v %s", recorder.Header(), recorder.Body.String())
 		}
+	}
+}
+
+func TestCredentialEventsEndpointEnforcesAdminScope(t *testing.T) {
+	t.Parallel()
+
+	users := openSessionTestUsers(t)
+	memberHash, err := passwordutil.Hash([]byte("member-password-01"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := users.db.Create(&model2.UserDBModel{Username: "member", Password: memberHash, Role: "user"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, memberAccess, _ := loginTestTokens(t, users, "member", "member-password-01")
+	if memberAccess == "" {
+		t.Fatal("member login issued no token")
+	}
+	member := users.GetUserInfoByUserName("member")
+	if member.Id < 1 {
+		t.Fatal("member user is missing")
+	}
+
+	recorder := authenticatedSessionHandlerAs(t, users, member.Id, GetCredentialEvents, http.MethodGet, "/v1/users/credential-events?user_id=0", "", memberAccess)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("member all-events status = %d, want 403: %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = authenticatedSessionHandlerAs(t, users, member.Id, GetCredentialEvents, http.MethodGet, "/v1/users/credential-events?user_id=999999", "", memberAccess)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("member foreign-events status = %d, want 403: %s", recorder.Code, recorder.Body.String())
 	}
 }
 

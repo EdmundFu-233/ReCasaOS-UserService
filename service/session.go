@@ -10,17 +10,21 @@ import (
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
 	// loginFailureLimit locks a rate-limit key after this many consecutive
-	// failures; the lock lasts loginLockoutDuration from the last failure.
-	loginFailureLimit  = 5
-	loginLockoutWindow = time.Hour
-	loginLockoutLength = 15 * time.Minute
-	credentialEventCap = 100
-	refreshSessionCap  = 256
-	revokedAccessCap   = 1024
+	// failures; the lock lasts loginLockoutLength from the last failure and
+	// is never extended by further failures.
+	loginFailureLimit        = 5
+	loginLockoutWindow       = time.Hour
+	loginLockoutLength       = 15 * time.Minute
+	loginAttemptRetention    = 24 * time.Hour
+	credentialEventRetention = 180 * 24 * time.Hour
+	credentialEventCap       = 100
+	refreshSessionCap        = 256
+	revokedAccessCap         = 1024
 )
 
 var (
@@ -118,8 +122,14 @@ func (u *userService) RotateRefreshSession(presentedSHA256, replacementID, repla
 	})
 	if reused {
 		// The family revocation runs outside the rolled-back read
-		// transaction so a replay cannot undo its own containment.
-		_ = revokeUserSessions(u.db, reusedUserID, now, "refresh token reuse detected")
+		// transaction so a replay cannot undo its own containment, and the
+		// credential generation advances so a concurrent rotation that
+		// committed after the revocation still cannot mint a usable token.
+		revokeErr := revokeUserSessions(u.db, reusedUserID, now, "refresh token reuse detected")
+		_, bumpErr := u.BumpTokenVersion(reusedUserID)
+		if err := errors.Join(revokeErr, bumpErr); err != nil {
+			return model.RefreshSessionDBModel{}, err
+		}
 		return model.RefreshSessionDBModel{}, ErrRefreshSessionReused
 	}
 	if err != nil {
@@ -248,7 +258,10 @@ func (u *userService) RevokeAccessToken(tokenID string, userID int, expiresAt ti
 	if u == nil || u.db == nil || tokenID == "" || userID < 1 {
 		return errors.New("invalid access token revocation")
 	}
-	return u.db.Create(&model.RevokedAccessTokenDBModel{
+	return u.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "jti"}},
+		DoNothing: true,
+	}).Create(&model.RevokedAccessTokenDBModel{
 		JTI:       tokenID,
 		UserID:    userID,
 		ExpiresAt: expiresAt,
@@ -256,16 +269,17 @@ func (u *userService) RevokeAccessToken(tokenID string, userID int, expiresAt ti
 }
 
 // IsAccessTokenRevoked reports whether one access-token identifier was
-// revoked. Unknown identifiers on an available store are not revoked.
-func (u *userService) IsAccessTokenRevoked(tokenID string) bool {
+// revoked. A store error fails closed: the caller must deny the request
+// rather than treat an unreadable denylist as empty.
+func (u *userService) IsAccessTokenRevoked(tokenID string) (bool, error) {
 	if u == nil || u.db == nil || tokenID == "" {
-		return false
+		return false, errors.New("access token revocation store is unavailable")
 	}
 	var count int64
 	if err := u.db.Model(&model.RevokedAccessTokenDBModel{}).Where("jti = ?", tokenID).Count(&count).Error; err != nil {
-		return false
+		return false, err
 	}
-	return count > 0
+	return count > 0, nil
 }
 
 // CheckLoginLockout reports whether a rate-limit key is locked and how long a
@@ -285,15 +299,18 @@ func (u *userService) CheckLoginLockout(key string, now time.Time) (bool, time.D
 }
 
 // RecordLoginFailure counts one failed attempt and locks the key once the
-// failure budget is exhausted. It returns the lock state after recording.
-func (u *userService) RecordLoginFailure(key string, now time.Time) (bool, time.Duration) {
+// failure budget is exhausted. An already-locked key keeps its original
+// expiry instead of extending it, so failures cannot hold a lock forever.
+// A store error fails closed: the caller must not let the attempt proceed
+// uncounted.
+func (u *userService) RecordLoginFailure(key string, now time.Time) (bool, time.Duration, error) {
 	if u == nil || u.db == nil || key == "" {
-		return false, 0
+		return false, 0, errors.New("login attempt store is unavailable")
 	}
 	var attempt model.LoginAttemptDBModel
 	locked := false
 	var retryAfter time.Duration
-	_ = u.db.Transaction(func(transaction *gorm.DB) error {
+	err := u.db.Transaction(func(transaction *gorm.DB) error {
 		if err := transaction.Where("key = ?", key).First(&attempt).Error; err != nil {
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
@@ -302,6 +319,11 @@ func (u *userService) RecordLoginFailure(key string, now time.Time) (bool, time.
 			if err := transaction.Create(&attempt).Error; err != nil {
 				return err
 			}
+		}
+		if attempt.LockedUntil != nil && now.Before(*attempt.LockedUntil) {
+			locked = true
+			retryAfter = attempt.LockedUntil.Sub(now)
+			return nil
 		}
 		if attempt.WindowStartedAt.IsZero() || now.Sub(attempt.WindowStartedAt) > loginLockoutWindow {
 			attempt.Failures = 0
@@ -317,7 +339,10 @@ func (u *userService) RecordLoginFailure(key string, now time.Time) (bool, time.
 		}
 		return transaction.Save(&attempt).Error
 	})
-	return locked, retryAfter
+	if err != nil {
+		return false, 0, err
+	}
+	return locked, retryAfter, nil
 }
 
 // RecordLoginSuccess clears the failure budget after a successful login.
@@ -370,13 +395,23 @@ func (u *userService) ListCredentialEvents(actorUserID, limit int) []model.Crede
 	return events
 }
 
-// PruneAuthState removes expired revocation and session rows while retaining
-// consumed-session history for reuse audits. It is best-effort by design and
-// never fails authentication.
+// PruneAuthState removes expired revocation and session rows, stale
+// rate-limit budgets, old audit events, and per-user rows beyond the session
+// and denylist caps. Consumed-but-live sessions are retained because a replay
+// must still be recognized as reuse. It is best-effort by design and never
+// fails authentication.
 func (u *userService) PruneAuthState(now time.Time) {
 	if u == nil || u.db == nil {
 		return
 	}
 	_ = u.db.Where("expires_at < ?", now).Delete(&model.RevokedAccessTokenDBModel{}).Error
-	_ = u.db.Where("expires_at < ? AND used_at IS NOT NULL", now).Delete(&model.RefreshSessionDBModel{}).Error
+	_ = u.db.Where("expires_at < ?", now).Delete(&model.RefreshSessionDBModel{}).Error
+	_ = u.db.Where("window_started_at < ? AND (locked_until IS NULL OR locked_until < ?)",
+		now.Add(-loginAttemptRetention), now).Delete(&model.LoginAttemptDBModel{}).Error
+	_ = u.db.Where("occurred_at < ?", now.Add(-credentialEventRetention)).Delete(&model.CredentialEventDBModel{}).Error
+	_ = u.db.Exec(`DELETE FROM o_refresh_sessions WHERE id NOT IN (
+		SELECT id FROM o_refresh_sessions AS kept WHERE kept.user_id = o_refresh_sessions.user_id
+		ORDER BY kept.issued_at DESC, kept.id DESC LIMIT ?)`, refreshSessionCap).Error
+	_ = u.db.Exec(`DELETE FROM o_revoked_access_tokens WHERE jti NOT IN (
+		SELECT jti FROM o_revoked_access_tokens AS kept ORDER BY kept.expires_at DESC LIMIT ?)`, revokedAccessCap).Error
 }

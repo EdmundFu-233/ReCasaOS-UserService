@@ -2,7 +2,9 @@ package service
 
 import (
 	"errors"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,6 +109,62 @@ func TestRotateRefreshSessionRejectsUnknownExpiredAndRevoked(t *testing.T) {
 	}
 }
 
+func TestConcurrentRotationSingleWinner(t *testing.T) {
+	t.Parallel()
+
+	users := openSessionStoreTestUsers(t)
+	now := time.Now()
+	if err := users.CreateRefreshSession(1, "sha-first", now, now.Add(time.Hour), "session-first"); err != nil {
+		t.Fatal(err)
+	}
+	const racers = 8
+	results := make(chan error, racers)
+	var running sync.WaitGroup
+	start := make(chan struct{})
+	for index := 0; index < racers; index++ {
+		running.Add(1)
+		go func(index int) {
+			defer running.Done()
+			<-start
+			name := "session-racer-" + strconv.Itoa(index)
+			_, err := users.RotateRefreshSession("sha-first", name, "sha-"+name, now, now.Add(time.Hour), now)
+			results <- err
+		}(index)
+	}
+	close(start)
+	running.Wait()
+	succeeded := 0
+	for index := 0; index < racers; index++ {
+		// Losers fail either on the compare-and-swap or on SQLite write
+		// contention; both prove no double-spend happened.
+		if err := <-results; err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("concurrent rotations succeeded = %d, want 1", succeeded)
+	}
+}
+
+func TestPasswordChangeInvalidatesOldTokens(t *testing.T) {
+	t.Parallel()
+
+	users := openSessionStoreTestUsers(t)
+	now := time.Now()
+	issued, err := users.IssueLoginSession(1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := users.ChangeUserPassword("1", []byte("session-store-password-01"), []byte("session-store-password-02")); err != nil {
+		t.Fatalf("password change failed: %v", err)
+	}
+	if _, err := users.IssueRefreshedTokens(issued.RefreshToken, now); !errors.Is(err, ErrInvalidRefreshSession) {
+		t.Fatalf("post-change refresh error = %v, want ErrInvalidRefreshSession", err)
+	}
+	if username, version, exists := users.GetUserTokenVersion(1); !exists || username != "admin" || version != 1 {
+		t.Fatalf("version after change = %q, %d, %v", username, version, exists)
+	}
+}
 func TestBumpTokenVersionInvalidatesOldGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -137,17 +195,17 @@ func TestLogoutSessionAndLogoutAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if users.IsAccessTokenRevoked(first.SessionID) {
-		t.Fatal("fresh access token reported revoked")
+	if revoked, err := users.IsAccessTokenRevoked(first.SessionID); err != nil || revoked {
+		t.Fatalf("fresh access token revoked=%v err=%v", revoked, err)
 	}
 	if err := users.LogoutSession(1, first.SessionID, now.Add(3*time.Hour)); err != nil {
 		t.Fatalf("logout failed: %v", err)
 	}
-	if !users.IsAccessTokenRevoked(first.SessionID) {
-		t.Fatal("logged-out access token still accepted")
+	if revoked, err := users.IsAccessTokenRevoked(first.SessionID); err != nil || !revoked {
+		t.Fatalf("logged-out access token revoked=%v err=%v", revoked, err)
 	}
-	if users.IsAccessTokenRevoked(second.SessionID) {
-		t.Fatal("other session was revoked by single logout")
+	if revoked, err := users.IsAccessTokenRevoked(second.SessionID); err != nil || revoked {
+		t.Fatalf("other session revoked=%v err=%v", revoked, err)
 	}
 	if err := users.LogoutAllSessions(1); err != nil {
 		t.Fatalf("logout-all failed: %v", err)
@@ -172,14 +230,27 @@ func TestLoginLockoutLifecycle(t *testing.T) {
 	now := time.Now()
 	key := LoginAttemptKey("login", "admin")
 	for attempt := 1; attempt <= 4; attempt++ {
-		locked, _ := users.RecordLoginFailure(key, now)
+		locked, _, err := users.RecordLoginFailure(key, now)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if locked {
 			t.Fatalf("locked after %d failures, want 5", attempt)
 		}
 	}
-	locked, retryAfter := users.RecordLoginFailure(key, now)
+	locked, retryAfter, err := users.RecordLoginFailure(key, now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !locked || retryAfter <= 0 {
 		t.Fatalf("fifth failure locked=%v retry=%v, want lock", locked, retryAfter)
+	}
+	locked, retryAfter, err = users.RecordLoginFailure(key, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked || retryAfter > loginLockoutLength {
+		t.Fatalf("extended lock retry=%v, want at most %v", retryAfter, loginLockoutLength)
 	}
 	if locked, _ := users.CheckLoginLockout(key, now); !locked {
 		t.Fatal("lockout not reported")
@@ -247,10 +318,10 @@ func TestPruneAuthStateRemovesOnlyExpiredRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	users.PruneAuthState(now)
-	if users.IsAccessTokenRevoked("expired-jti") {
-		t.Fatal("expired revocation was not pruned")
+	if revoked, err := users.IsAccessTokenRevoked("expired-jti"); err != nil || revoked {
+		t.Fatalf("expired revocation revoked=%v err=%v, want pruned", revoked, err)
 	}
-	if !users.IsAccessTokenRevoked("live-jti") {
-		t.Fatal("live revocation was pruned")
+	if revoked, err := users.IsAccessTokenRevoked("live-jti"); err != nil || !revoked {
+		t.Fatalf("live revocation revoked=%v err=%v, want retained", revoked, err)
 	}
 }

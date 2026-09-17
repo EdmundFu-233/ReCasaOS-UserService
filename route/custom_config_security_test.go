@@ -237,8 +237,8 @@ func (stub customConfigUserStub) GetUserTokenVersion(userID int) (string, int, b
 	return stub.user.Username, 0, true
 }
 
-func (stub customConfigUserStub) IsAccessTokenRevoked(string) bool {
-	return false
+func (stub customConfigUserStub) IsAccessTokenRevoked(string) (bool, error) {
+	return false, nil
 }
 
 func (stub customConfigUserStub) GetUserInfoById(id string) servicemodel.UserDBModel {
