@@ -17,11 +17,11 @@ import (
 	"testing"
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/codegen/message_bus"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/authsecurity"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userconfig"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 	servicemodel "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
-	commonjwt "github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	"github.com/labstack/echo/v4"
 )
 
@@ -80,7 +80,7 @@ func TestCustomConfigRouterContainsPathsAndUsesAuthenticatedIdentity(t *testing.
 		t.Fatal(err)
 	}
 
-	accessToken, err := commonjwt.GetAccessToken(users.user.Username, privateKey, users.user.Id)
+	accessToken, err := authsecurity.MintAccessToken(users.user.Username, users.user.Id, 0, "custom-config-jti", privateKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +228,17 @@ type customConfigUserStub struct {
 
 func (stub customConfigUserStub) GetKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
 	return stub.privateKey, &stub.privateKey.PublicKey
+}
+
+func (stub customConfigUserStub) GetUserTokenVersion(userID int) (string, int, bool) {
+	if userID != stub.user.Id {
+		return "", 0, false
+	}
+	return stub.user.Username, 0, true
+}
+
+func (stub customConfigUserStub) IsAccessTokenRevoked(string) bool {
+	return false
 }
 
 func (stub customConfigUserStub) GetUserInfoById(id string) servicemodel.UserDBModel {

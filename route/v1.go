@@ -48,6 +48,10 @@ func InitRouter() http.Handler {
 		v1UsersGroup.GET("/avatar", v1.GetUserAvatar)
 		v1UsersGroup.GET("/name", v1.GetUserAllUsername)
 
+		v1UsersGroup.POST("/logout", v1.PostUserLogout)
+		v1UsersGroup.POST("/logout-all", v1.PostUserLogoutAll)
+		v1UsersGroup.GET("/credential-events", v1.GetCredentialEvents)
+
 		v1UsersGroup.DELETE("/:id", v1.DeleteUser)
 		v1UsersGroup.GET("/:username", v1.GetUserInfoByUsername)
 		v1UsersGroup.DELETE("", v1.DeleteUserAll)

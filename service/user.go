@@ -19,7 +19,9 @@ import (
 	"mime/multipart"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	passwordutil "github.com/EdmundFu-233/ReCasaOS-UserService/pkg/password"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
@@ -59,6 +61,26 @@ type UserService interface {
 	GetAllUserName() (list []model.UserDBModel)
 
 	GetKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey)
+
+	CreateRefreshSession(userID int, tokenSHA256 string, issuedAt, expiresAt time.Time, sessionID string) error
+	RotateRefreshSession(presentedSHA256, replacementID, replacementSHA256 string, issuedAt, expiresAt, now time.Time) (model.RefreshSessionDBModel, error)
+	RevokeRefreshSession(sessionID, reason string) error
+	RevokeUserRefreshSession(userID int, sessionID, reason string) error
+	IssueLoginSession(userID int, now time.Time) (IssuedSession, error)
+	IssueRefreshedTokens(presented string, now time.Time) (IssuedSession, error)
+	LogoutSession(userID int, sessionID string, accessExpires time.Time) error
+	LogoutAllSessions(userID int) error
+	RevokeAllUserSessions(userID int, reason string) error
+	BumpTokenVersion(userID int) (int, error)
+	GetUserTokenVersion(userID int) (string, int, bool)
+	RevokeAccessToken(tokenID string, userID int, expiresAt time.Time) error
+	IsAccessTokenRevoked(tokenID string) bool
+	CheckLoginLockout(key string, now time.Time) (bool, time.Duration)
+	RecordLoginFailure(key string, now time.Time) (bool, time.Duration)
+	RecordLoginSuccess(key string)
+	LogCredentialEvent(actorUserID int, eventType string, success bool, source, detail string)
+	ListCredentialEvents(actorUserID, limit int) []model.CredentialEventDBModel
+	PruneAuthState(now time.Time)
 }
 
 type userService struct {
@@ -124,6 +146,11 @@ func (u *userService) DeleteUserById(id string) (err error) {
 		return fmt.Errorf("commit user deletion: %w", err)
 	}
 	committed = true
+	// A deleted user must not keep usable sessions. The middleware already
+	// rejects unknown users; retiring the rows closes the refresh path too.
+	if userID, err := strconv.Atoi(id); err == nil {
+		_ = u.RevokeAllUserSessions(userID, "account deleted")
+	}
 	return nil
 }
 
@@ -200,6 +227,7 @@ func (u *userService) ChangeUserPassword(id string, oldPassword, newPassword []b
 		return fmt.Errorf("load user for password change: %w", err)
 	}
 	if err := passwordutil.Verify(user.Password, oldPassword); err != nil {
+		u.LogCredentialEvent(user.Id, model.CredentialEventPasswordChanged, false, "password-change", "")
 		return ErrInvalidCredentials
 	}
 	newHash, err := passwordutil.Hash(newPassword)
@@ -208,13 +236,21 @@ func (u *userService) ChangeUserPassword(id string, oldPassword, newPassword []b
 	}
 	result := u.db.Model(&model.UserDBModel{}).
 		Where("id = ? AND password = ?", user.Id, user.Password).
-		Update("password", newHash)
+		Updates(map[string]interface{}{
+			"password":      newHash,
+			"token_version": gorm.Expr("token_version + 1"),
+		})
 	if result.Error != nil {
 		return fmt.Errorf("store new password: %w", result.Error)
 	}
 	if result.RowsAffected != 1 {
 		return ErrPasswordChanged
 	}
+	// A password change retires every session minted under the old verifier:
+	// the version bump invalidates live access tokens and the revoked refresh
+	// rows fail rotation. Best-effort only; the password itself is committed.
+	_ = revokeUserSessions(u.db, user.Id, time.Now(), "password change")
+	u.LogCredentialEvent(user.Id, model.CredentialEventPasswordChanged, true, "password-change", "")
 	return nil
 }
 
@@ -291,7 +327,25 @@ func BootstrapAdmin(ctx context.Context, db *gorm.DB, seal userbootstrap.Seal, u
 	if err != nil {
 		return 0, fmt.Errorf("access user database pool: %w", err)
 	}
-	return userbootstrap.CreateAdmin(ctx, sqlDB, seal, username, hash, beforeCommit)
+	userID, err := userbootstrap.CreateAdmin(ctx, sqlDB, seal, username, hash, beforeCommit)
+	if err != nil {
+		return 0, err
+	}
+	installationID := ""
+	if seal != nil {
+		if loaded, _, loadErr := seal.Load(); loadErr == nil {
+			installationID = loaded
+		}
+	}
+	_ = ignoreMissingAuthTable(db.Create(&model.CredentialEventDBModel{
+		OccurredAt:     time.Now(),
+		InstallationID: installationID,
+		ActorUserID:    int(userID),
+		EventType:      model.CredentialEventBootstrapCreated,
+		Success:        true,
+		Source:         "bootstrap",
+	}).Error)
+	return userID, nil
 }
 
 // ResetAdminPassword replaces an existing administrator's verifier while the
@@ -408,6 +462,17 @@ func ResetAdminPassword(ctx context.Context, db *gorm.DB, seal userbootstrap.Sea
 		return fmt.Errorf("commit administrator reset: %w", err)
 	}
 	committed = true
+	// Retire sessions minted under the replaced verifier. Best-effort on
+	// legacy databases: a missing session table must not fail the reset.
+	_, _ = conn.ExecContext(context.Background(), `UPDATE o_users SET token_version = token_version + 1 WHERE id = ?`, userID)
+	_, _ = conn.ExecContext(context.Background(), `DELETE FROM o_refresh_sessions WHERE user_id = ?`, userID)
+	_ = ignoreMissingAuthTable(db.Create(&model.CredentialEventDBModel{
+		OccurredAt:  time.Now(),
+		ActorUserID: int(userID),
+		EventType:   model.CredentialEventPasswordReset,
+		Success:     true,
+		Source:      "admin-reset",
+	}).Error)
 	return nil
 }
 
@@ -530,6 +595,17 @@ func ResetUserPassword(ctx context.Context, db *gorm.DB, seal userbootstrap.Seal
 		return fmt.Errorf("commit user reset: %w", err)
 	}
 	committed = true
+	// Retire sessions minted under the replaced verifier. Best-effort on
+	// legacy databases: a missing session table must not fail the reset.
+	_, _ = conn.ExecContext(context.Background(), `UPDATE o_users SET token_version = token_version + 1 WHERE id = ?`, userID)
+	_, _ = conn.ExecContext(context.Background(), `DELETE FROM o_refresh_sessions WHERE user_id = ?`, userID)
+	_ = ignoreMissingAuthTable(db.Create(&model.CredentialEventDBModel{
+		OccurredAt:  time.Now(),
+		ActorUserID: int(userID),
+		EventType:   model.CredentialEventPasswordReset,
+		Success:     true,
+		Source:      "user-reset",
+	}).Error)
 	return nil
 }
 

@@ -2,7 +2,6 @@ package v1
 
 import (
 	"context"
-	"crypto/ecdsa"
 	json2 "encoding/json"
 	"errors"
 	"io"
@@ -10,23 +9,21 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/common"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/model"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/model/system_model"
-	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/authsecurity"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/config"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userbootstrap"
 	"github.com/EdmundFu-233/ReCasaOS-UserService/pkg/userconfig"
 	model2 "github.com/EdmundFu-233/ReCasaOS-UserService/service/model"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/common_err"
-	"github.com/IceWhaleTech/CasaOS-Common/utils/jwt"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
 	"github.com/labstack/echo/v4"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 
 	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 )
@@ -42,9 +39,9 @@ func PostUserRegister(ctx echo.Context) error {
 	})
 }
 
-var limiter = rate.NewLimiter(rate.Every(time.Minute), 5)
-
 const maxLoginRequestBodyBytes = 4 << 10
+
+const maxRefreshRequestBodyBytes = 12 << 10
 
 var customConfigKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
@@ -59,13 +56,6 @@ var customConfigKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63
 func PostUserLogin(ctx echo.Context) error {
 	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
 	ctx.Response().Header().Set("Pragma", "no-cache")
-	if !limiter.Allow() {
-		return ctx.JSON(common_err.TOO_MANY_REQUEST,
-			model.Result{
-				Success: common_err.TOO_MANY_LOGIN_REQUESTS,
-				Message: common_err.GetMsg(common_err.TOO_MANY_LOGIN_REQUESTS),
-			})
-	}
 
 	requestBody := http.MaxBytesReader(ctx.Response(), ctx.Request().Body, maxLoginRequestBodyBytes)
 	decoder := json2.NewDecoder(requestBody)
@@ -93,8 +83,19 @@ func PostUserLogin(ctx echo.Context) error {
 				Message: common_err.GetMsg(common_err.INVALID_PARAMS),
 			})
 	}
-	user, err := service.MyService.User().AuthenticateUser(username, []byte(password))
+	users := service.MyService.User()
+	now := time.Now()
+	attemptKey := service.LoginAttemptKey("login", strings.ToLower(username))
+	if locked, retryAfter := users.CheckLoginLockout(attemptKey, now); locked {
+		return loginRateLimited(ctx, retryAfter)
+	}
+	user, err := users.AuthenticateUser(username, []byte(password))
 	if errors.Is(err, service.ErrInvalidCredentials) {
+		if locked, retryAfter := users.RecordLoginFailure(attemptKey, now); locked {
+			users.LogCredentialEvent(0, model2.CredentialEventLoginLockout, false, "login", "")
+			return loginRateLimited(ctx, retryAfter)
+		}
+		users.LogCredentialEvent(0, model2.CredentialEventLoginFailure, false, "login", "")
 		return ctx.JSON(common_err.CLIENT_ERROR,
 			model.Result{Success: common_err.USER_NOT_EXIST_OR_PWD_INVALID, Message: common_err.GetMsg(common_err.USER_NOT_EXIST_OR_PWD_INVALID)})
 	}
@@ -103,28 +104,19 @@ func PostUserLogin(ctx echo.Context) error {
 		return ctx.JSON(http.StatusInternalServerError,
 			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
+	users.RecordLoginSuccess(attemptKey)
 
-	privateKey, _ := service.MyService.User().GetKeyPair()
-	if privateKey == nil {
+	issued, err := users.IssueLoginSession(user.Id, now)
+	if err != nil {
+		logger.Error("issue login session", zap.Error(err))
 		return ctx.JSON(http.StatusInternalServerError,
 			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
 	}
+	users.LogCredentialEvent(user.Id, model2.CredentialEventLoginSuccess, true, "login", "")
 
 	token := system_model.VerifyInformation{}
-
-	accessToken, err := jwt.GetAccessToken(user.Username, privateKey, user.Id)
-	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError,
-			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
-	}
-	token.AccessToken = accessToken
-
-	refreshToken, err := jwt.GetRefreshToken(user.Username, privateKey, user.Id)
-	if err != nil {
-		return ctx.JSON(http.StatusInternalServerError,
-			model.Result{Success: common_err.SERVICE_ERROR, Message: common_err.GetMsg(common_err.SERVICE_ERROR)})
-	}
-	token.RefreshToken = refreshToken
+	token.AccessToken = issued.AccessToken
+	token.RefreshToken = issued.RefreshToken
 
 	token.ExpiresAt = time.Now().Add(3 * time.Hour * time.Duration(1)).Unix()
 	data := make(map[string]interface{}, 2)
@@ -139,6 +131,22 @@ func PostUserLogin(ctx echo.Context) error {
 			Success: common_err.SUCCESS,
 			Message: common_err.GetMsg(common_err.SUCCESS),
 			Data:    data,
+		})
+}
+
+// loginRateLimited answers a locked credential key with 429 and a
+// Retry-After hint. The body stays indistinguishable from the previous
+// global-limiter response.
+func loginRateLimited(ctx echo.Context, retryAfter time.Duration) error {
+	seconds := int64(retryAfter.Round(time.Second).Seconds())
+	if seconds < 1 {
+		seconds = 1
+	}
+	ctx.Response().Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	return ctx.JSON(common_err.TOO_MANY_REQUEST,
+		model.Result{
+			Success: common_err.TOO_MANY_LOGIN_REQUESTS,
+			Message: common_err.GetMsg(common_err.TOO_MANY_LOGIN_REQUESTS),
 		})
 }
 
@@ -603,15 +611,26 @@ func PostUserRefreshToken(ctx echo.Context) error {
 		return refreshUnauthorized(ctx)
 	}
 
-	verifyInfo, err := issueRefreshedTokens(request.RefreshToken, service.MyService.User())
-	if errors.Is(err, errInvalidRefreshSession) {
+	users := service.MyService.User()
+	issued, err := users.IssueRefreshedTokens(request.RefreshToken, time.Now())
+	switch {
+	case errors.Is(err, service.ErrRefreshSessionReused):
+		users.LogCredentialEvent(0, model2.CredentialEventRefreshReuse, false, "refresh", "")
 		return refreshUnauthorized(ctx)
-	}
-	if err != nil {
+	case errors.Is(err, service.ErrInvalidRefreshSession):
+		users.LogCredentialEvent(0, model2.CredentialEventRefreshFailure, false, "refresh", "")
+		return refreshUnauthorized(ctx)
+	case err != nil:
 		return ctx.JSON(http.StatusInternalServerError, model.Result{
 			Success: common_err.SERVICE_ERROR,
 			Message: common_err.GetMsg(common_err.SERVICE_ERROR),
 		})
+	}
+	users.LogCredentialEvent(issued.User.Id, model2.CredentialEventRefreshSuccess, true, "refresh", "")
+	verifyInfo := system_model.VerifyInformation{
+		AccessToken:  issued.AccessToken,
+		RefreshToken: issued.RefreshToken,
+		ExpiresAt:    issued.ExpiresAt.Unix(),
 	}
 	return ctx.JSON(common_err.SUCCESS, model.Result{
 		Success: common_err.SUCCESS,
@@ -620,56 +639,111 @@ func PostUserRefreshToken(ctx echo.Context) error {
 	})
 }
 
-const maxRefreshRequestBodyBytes = 12 << 10
-
-var (
-	errInvalidRefreshSession = errors.New("invalid refresh session")
-	errRefreshSigning        = errors.New("refresh token signing failed")
-)
-
-type refreshTokenUserService interface {
-	GetKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey)
-	GetUserInfoById(string) model2.UserDBModel
-}
-
-func issueRefreshedTokens(refresh string, users refreshTokenUserService) (system_model.VerifyInformation, error) {
-	if users == nil {
-		return system_model.VerifyInformation{}, errRefreshSigning
-	}
-	privateKey, publicKey := users.GetKeyPair()
-	if privateKey == nil || publicKey == nil {
-		return system_model.VerifyInformation{}, errRefreshSigning
-	}
-	claims, err := authsecurity.ValidateRefreshToken(refresh, func() (*ecdsa.PublicKey, error) {
-		return publicKey, nil
-	})
-	if err != nil {
-		return system_model.VerifyInformation{}, errInvalidRefreshSession
-	}
-	user := users.GetUserInfoById(strconv.Itoa(claims.ID))
-	if user.Id != claims.ID || user.Username != claims.Username {
-		return system_model.VerifyInformation{}, errInvalidRefreshSession
-	}
-
-	newAccessToken, err := jwt.GetAccessToken(user.Username, privateKey, user.Id)
-	if err != nil {
-		return system_model.VerifyInformation{}, errRefreshSigning
-	}
-	newRefreshToken, err := jwt.GetRefreshToken(user.Username, privateKey, user.Id)
-	if err != nil {
-		return system_model.VerifyInformation{}, errRefreshSigning
-	}
-	return system_model.VerifyInformation{
-		AccessToken:  newAccessToken,
-		RefreshToken: newRefreshToken,
-		ExpiresAt:    time.Now().Add(3 * time.Hour).Unix(),
-	}, nil
-}
-
 func refreshUnauthorized(ctx echo.Context) error {
 	return ctx.JSON(http.StatusUnauthorized, model.Result{
 		Success: common_err.VERIFICATION_FAILURE,
 		Message: common_err.GetMsg(common_err.VERIFICATION_FAILURE),
+	})
+}
+
+// PostUserLogout retires the presenting session: its refresh row and its
+// access token are rejected from now on. Other sessions are untouched.
+func PostUserLogout(ctx echo.Context) error {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	authentication, ok := ctx.Get(service.SessionContextKey).(service.AuthenticatedSession)
+	if !ok {
+		return ctx.JSON(http.StatusUnauthorized, model.Result{
+			Success: common_err.VERIFICATION_FAILURE,
+			Message: common_err.GetMsg(common_err.VERIFICATION_FAILURE),
+		})
+	}
+	users := service.MyService.User()
+	if err := users.LogoutSession(authentication.UserID, authentication.TokenID, authentication.Expires); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, model.Result{
+			Success: common_err.SERVICE_ERROR,
+			Message: common_err.GetMsg(common_err.SERVICE_ERROR),
+		})
+	}
+	users.LogCredentialEvent(authentication.UserID, model2.CredentialEventLogout, true, "logout", "")
+	return ctx.JSON(common_err.SUCCESS, model.Result{
+		Success: common_err.SUCCESS,
+		Message: common_err.GetMsg(common_err.SUCCESS),
+	})
+}
+
+// PostUserLogoutAll retires every session of the presenting user, including
+// live access tokens, by advancing the credential generation.
+func PostUserLogoutAll(ctx echo.Context) error {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	authentication, ok := ctx.Get(service.SessionContextKey).(service.AuthenticatedSession)
+	if !ok {
+		return ctx.JSON(http.StatusUnauthorized, model.Result{
+			Success: common_err.VERIFICATION_FAILURE,
+			Message: common_err.GetMsg(common_err.VERIFICATION_FAILURE),
+		})
+	}
+	users := service.MyService.User()
+	if err := users.LogoutAllSessions(authentication.UserID); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, model.Result{
+			Success: common_err.SERVICE_ERROR,
+			Message: common_err.GetMsg(common_err.SERVICE_ERROR),
+		})
+	}
+	users.LogCredentialEvent(authentication.UserID, model2.CredentialEventLogoutAll, true, "logout-all", "")
+	return ctx.JSON(common_err.SUCCESS, model.Result{
+		Success: common_err.SUCCESS,
+		Message: common_err.GetMsg(common_err.SUCCESS),
+	})
+}
+
+// GetCredentialEvents returns the most recent auditable credential events for
+// the presenting user, newest first. Administrators may pass user_id=0 to
+// read every user's events. The store holds identities and outcomes only.
+func GetCredentialEvents(ctx echo.Context) error {
+	ctx.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+	ctx.Response().Header().Set("Pragma", "no-cache")
+	authentication, ok := ctx.Get(service.SessionContextKey).(service.AuthenticatedSession)
+	if !ok {
+		return ctx.JSON(http.StatusUnauthorized, model.Result{
+			Success: common_err.VERIFICATION_FAILURE,
+			Message: common_err.GetMsg(common_err.VERIFICATION_FAILURE),
+		})
+	}
+	users := service.MyService.User()
+	actor := authentication.UserID
+	if requested := ctx.QueryParam("user_id"); requested != "" {
+		target, err := strconv.Atoi(requested)
+		if err != nil || target < 0 {
+			return ctx.JSON(common_err.CLIENT_ERROR, model.Result{
+				Success: common_err.INVALID_PARAMS,
+				Message: common_err.GetMsg(common_err.INVALID_PARAMS),
+			})
+		}
+		if target == 0 {
+			current := users.GetUserInfoById(strconv.Itoa(authentication.UserID))
+			if current.Role != "admin" {
+				return ctx.JSON(http.StatusForbidden, model.Result{
+					Success: common_err.CLIENT_ERROR,
+					Message: common_err.GetMsg(common_err.CLIENT_ERROR),
+				})
+			}
+		} else if target != authentication.UserID {
+			current := users.GetUserInfoById(strconv.Itoa(authentication.UserID))
+			if current.Role != "admin" {
+				return ctx.JSON(http.StatusForbidden, model.Result{
+					Success: common_err.CLIENT_ERROR,
+					Message: common_err.GetMsg(common_err.CLIENT_ERROR),
+				})
+			}
+		}
+		actor = target
+	}
+	return ctx.JSON(common_err.SUCCESS, model.Result{
+		Success: common_err.SUCCESS,
+		Message: common_err.GetMsg(common_err.SUCCESS),
+		Data:    users.ListCredentialEvents(actor, 100),
 	})
 }
 

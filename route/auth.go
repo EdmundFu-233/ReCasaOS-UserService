@@ -13,30 +13,43 @@ import (
 )
 
 const (
-	userAuthenticationContextKey = "recasaos/user-authentication"
-	maxAuthorizationHeaderBytes  = 8 << 10
+	maxAuthorizationHeaderBytes = 8 << 10
 )
 
 var errInvalidAuthorizationHeader = errors.New("invalid authorization header")
 
-// userAuthentication binds verified claims to the exact request that was
-// authenticated. It is intentionally not inferred from source IP or proxy
-// headers.
-type userAuthentication struct {
-	request  *http.Request
-	userID   int
-	username string
+// accessSessionValidator is the narrow session surface the authentication
+// middleware requires: credential-generation agreement plus access-token
+// revocation. Both checks consult the database, so a deleted user, a
+// password change, or an explicit logout takes effect without waiting for
+// the access token to expire.
+type accessSessionValidator interface {
+	GetUserTokenVersion(userID int) (string, int, bool)
+	IsAccessTokenRevoked(tokenID string) bool
 }
 
 func userAccessTokenMiddleware() echo.MiddlewareFunc {
 	return accessTokenMiddleware(func() (*ecdsa.PublicKey, error) {
+		if service.MyService == nil {
+			return nil, errors.New("user service is unavailable")
+		}
 		_, publicKey := service.MyService.User().GetKeyPair()
 		return publicKey, nil
-	})
+	}, userSessionValidator())
+}
+
+// userSessionValidator exposes the credential store to the middleware, or
+// nil when the service is unavailable so every request fails closed.
+func userSessionValidator() accessSessionValidator {
+	if service.MyService == nil {
+		return nil
+	}
+	return service.MyService.User()
 }
 
 func accessTokenMiddleware(
 	publicKey func() (*ecdsa.PublicKey, error),
+	sessions accessSessionValidator,
 ) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(ctx echo.Context) error {
@@ -44,22 +57,34 @@ func accessTokenMiddleware(
 			if err != nil {
 				return echo.ErrUnauthorized
 			}
-			claims, err := authsecurity.ValidateAccessToken(token, publicKey)
+			claims, err := authsecurity.ValidateSessionAccessToken(token, publicKey)
 			if err != nil {
 				return echo.ErrUnauthorized
 			}
+			if sessions == nil {
+				return echo.ErrUnauthorized
+			}
+			username, version, exists := sessions.GetUserTokenVersion(claims.UserID)
+			if !exists || username != claims.Username || version != claims.TokenVersion {
+				return echo.ErrUnauthorized
+			}
+			if sessions.IsAccessTokenRevoked(claims.ID) {
+				return echo.ErrUnauthorized
+			}
 
-			ctx.Set(userAuthenticationContextKey, userAuthentication{
-				request:  ctx.Request(),
-				userID:   claims.ID,
-				username: claims.Username,
+			ctx.Set(service.SessionContextKey, service.AuthenticatedSession{
+				Request:  ctx.Request(),
+				UserID:   claims.UserID,
+				Username: claims.Username,
+				TokenID:  claims.ID,
+				Expires:  claims.ExpiresAt.Time,
 			})
 
 			// Existing v1 handlers consume this internal value from the request
 			// header. It is overwritten only after authentication and never read
 			// as client-supplied evidence. A later API cleanup will move those
 			// handlers to the typed context value above.
-			ctx.Request().Header.Set("user_id", strconv.Itoa(claims.ID))
+			ctx.Request().Header.Set("user_id", strconv.Itoa(claims.UserID))
 			return next(ctx)
 		}
 	}
