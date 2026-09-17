@@ -8,6 +8,7 @@ import (
 
 	codegen "github.com/EdmundFu-233/ReCasaOS-UserService/codegen/user_service"
 	v2 "github.com/EdmundFu-233/ReCasaOS-UserService/route/v2"
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/labstack/echo/v4"
@@ -87,8 +88,8 @@ func v2OpenAPIAuthentication(
 		echoContext.Request() != input.RequestValidationInput.Request {
 		return echo.ErrUnauthorized
 	}
-	authentication, ok := echoContext.Get(userAuthenticationContextKey).(userAuthentication)
-	if !ok || authentication.request != echoContext.Request() {
+	authentication, ok := echoContext.Get(service.SessionContextKey).(service.AuthenticatedSession)
+	if !ok || authentication.Request != echoContext.Request() {
 		return echo.ErrUnauthorized
 	}
 	return nil

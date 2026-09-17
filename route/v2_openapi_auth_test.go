@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/EdmundFu-233/ReCasaOS-UserService/service"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/labstack/echo/v4"
@@ -19,10 +20,11 @@ func TestV2OpenAPIAuthenticationBindsExactVerifiedRequest(t *testing.T) {
 	e := echo.New()
 	request := httptest.NewRequest(http.MethodGet, "http://device.test/v2/users/events", nil)
 	echoContext := e.NewContext(request, httptest.NewRecorder())
-	echoContext.Set(userAuthenticationContextKey, userAuthentication{
-		request:  request,
-		userID:   7,
-		username: "admin",
+	echoContext.Set(service.SessionContextKey, service.AuthenticatedSession{
+		Request:  request,
+		UserID:   7,
+		Username: "admin",
+		TokenID:  "v2-auth-jti",
 	})
 	callbackContext := context.WithValue(
 		context.Background(),

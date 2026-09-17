@@ -113,7 +113,7 @@ func openDb(dbPath string, create, migrate bool) (*gorm.DB, error) {
 	}
 
 	if migrate {
-		if err := db.AutoMigrate(model2.UserDBModel{}, model2.BootstrapStateDBModel{}, model.EventModel{}); err != nil {
+		if err := db.AutoMigrate(model2.UserDBModel{}, model2.BootstrapStateDBModel{}, model.EventModel{}, model2.RefreshSessionDBModel{}, model2.LoginAttemptDBModel{}, model2.CredentialEventDBModel{}, model2.RevokedAccessTokenDBModel{}); err != nil {
 			return closeOnError(fmt.Errorf("migrate user database: %w", err))
 		}
 	}
