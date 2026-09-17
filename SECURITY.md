@@ -25,6 +25,12 @@ Public hardening work is tracked in
 [issue #1](https://github.com/EdmundFu-233/ReCasaOS-UserService/issues/1), but
 that issue is not a substitute for a private report.
 
+## Reviewed advisories
+
+Known CasaOS authentication advisories are mapped to their code, test, and
+deployment mitigations in [security/ADVISORY_REVIEW.md](security/ADVISORY_REVIEW.md).
+That record contains no exploit details.
+
 ## Safe testing
 
 Test only systems and accounts you own or are authorized to assess. Prefer an
