@@ -89,7 +89,7 @@ cleanup() {
     recasaos-user-account-password-reset.service \
     recasaos-user-bootstrap.service casaos-message-bus.service >/dev/null 2>&1
   rm -f -- /run/casaos/user-service.url /run/casaos/management.url /run/casaos/message-bus.url \
-    /run/casaos/recasaos-userservice-e2e-stub-state.json
+    /run/casaos/gateway.token /run/casaos/recasaos-userservice-e2e-stub-state.json
   rm -rf -- /run/recasaos-user-bootstrap /run/recasaos-user-password-reset /run/recasaos-user-account-password-reset
   case "$evidence_dir" in
     /run/recasaos-userservice-e2e-[0-9]*-[0-9]*)
@@ -159,6 +159,7 @@ EXPECTED_ROUTES = {
     "/doc/v2/users",
     "/.well-known/jwks.json",
 }
+SERVICE_TOKEN = "e2e-gateway-service-token"
 STATE_PATH = "/run/casaos/recasaos-userservice-e2e-stub-state.json"
 STATE_LOCK = threading.Lock()
 STATE = {
@@ -200,6 +201,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self.path.startswith("/v1/gateway"):
+            if self.headers.get("Authorization") != "Bearer " + SERVICE_TOKEN:
+                self.send_response(401)
+                self.end_headers()
+                return
         body = self._body()
         if body is None:
             self.send_response(413)
@@ -246,6 +252,13 @@ for name in ("management.url", "message-bus.url"):
         os.fsync(destination.fileno())
     os.chmod(temporary, 0o644)
     os.replace(temporary, os.path.join(runtime, name))
+token_temporary = os.path.join(runtime, ".gateway.token.tmp")
+with open(token_temporary, "w", encoding="ascii") as destination:
+    destination.write(SERVICE_TOKEN + "\n")
+    destination.flush()
+    os.fsync(destination.fileno())
+os.chmod(token_temporary, 0o600)
+os.replace(token_temporary, os.path.join(runtime, "gateway.token"))
 server.serve_forever()
 PYTHON
 chmod 0755 "$evidence_dir/fake-casaos.py"
